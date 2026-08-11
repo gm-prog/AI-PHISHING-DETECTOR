@@ -1,0 +1,131 @@
+/* Import Modern Sans-Serif Fonts from Google */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap');
+
+@import "tailwindcss";
+
+:root {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color-scheme: dark;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Outfit', sans-serif;
+}
+
+/* Custom Scrollbar for sleek UI feel */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(10, 15, 30, 0.5);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Glassmorphism Classes */
+.glass-panel {
+  background: rgba(13, 17, 30, 0.65);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-panel-hover {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.glass-panel-hover:hover {
+  background: rgba(18, 24, 43, 0.8);
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.7);
+}
+
+.glass-input {
+  background: rgba(8, 10, 20, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.25s ease;
+}
+.glass-input:focus {
+  border-color: rgba(59, 130, 246, 0.5);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+  outline: none;
+}
+
+/* Core scanlines and animated background meshes */
+.bg-mesh {
+  background-color: #030611;
+  background-image: 
+    radial-gradient(at 10% 20%, rgba(16, 24, 48, 0.3) 0px, transparent 50%),
+    radial-gradient(at 90% 10%, rgba(29, 78, 216, 0.1) 0px, transparent 50%),
+    radial-gradient(at 50% 80%, rgba(6, 182, 212, 0.08) 0px, transparent 50%);
+  background-attachment: fixed;
+}
+
+/* Keyframes for futuristic radar/scanning grids */
+@keyframes radar-scan {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+.scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.4), rgba(59, 130, 246, 0.8), rgba(6, 182, 212, 0.4), transparent);
+  animation: radar-scan 2.5s linear infinite;
+  pointer-events: none;
+}
+
+/* Custom HSL-based glow colors */
+.glow-safe {
+  box-shadow: 0 0 20px -2px rgba(34, 197, 94, 0.2);
+}
+.glow-warning {
+  box-shadow: 0 0 20px -2px rgba(245, 158, 11, 0.2);
+}
+.glow-danger {
+  box-shadow: 0 0 20px -2px rgba(239, 68, 68, 0.2);
+}
+
+/* Custom text and background gradient utilities */
+.text-gradient {
+  background: linear-gradient(135deg, #ffffff 30%, #a5b4fc 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.accent-cyan {
+  color: #22d3ee;
+}
+.accent-blue {
+  color: #60a5fa;
+}
+.accent-green {
+  color: #4ade80;
+}
+.accent-amber {
+  color: #fbbf24;
+}
+.accent-red {
+  color: #f87171;
+}
+
+/* Speed indicator transitions */
+.transition-slow {
+  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
