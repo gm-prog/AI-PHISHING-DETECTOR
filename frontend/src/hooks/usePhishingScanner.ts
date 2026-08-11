@@ -31,7 +31,7 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
   useEffect(() => {
     const fetchHistory = async () => {
       try {
-        const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+        const API_BASE = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || "http://localhost:8000";
         const res = await fetch(`${API_BASE}/api/history`);
         if (res.ok) {
           const data = await res.json();
@@ -60,7 +60,7 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
     progressSteps(0);
 
     try {
-      const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || "http://localhost:8000";
       const response = await fetch(`${API_BASE}/api/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
