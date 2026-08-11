@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: ai-phishing-detector-backend
+    env: python
+    region: oregon  # or closest to your location
+    plan: free
+    buildCommand: "cd backend && pip install -r requirements.txt"
+    startCommand: "cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    envVars:
+      - key: VIRUSTOTAL_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11"
