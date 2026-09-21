@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { usePhishingContext } from "../context/PhishingContext";
-import type { FullHistoryItem } from "../context/PhishingContext";
+import { useAuth } from "../context/AuthContext";
 import type { AnalysisResponse } from "../types";
 
 export interface ScanStep {
@@ -9,10 +9,10 @@ export interface ScanStep {
 }
 
 export const SCANNING_STEPS: ScanStep[] = [
-  { label: "Initializing Threat Gateway Connection", duration: 400 },
-  { label: "Executing Rule Heuristics & Typosquat Math", duration: 600 },
-  { label: "Scrutinizing Urgency & Social Engineering Cues", duration: 600 },
-  { label: "Generating Threat Intelligence Report", duration: 800 }
+  { label: "Initializing Sentinel Threat Gateway", duration: 350 },
+  { label: "Running Typosquat Entropy & Domain Anomaly Heuristics", duration: 500 },
+  { label: "Correlating Threat Intel & Urgency Vectors", duration: 500 },
+  { label: "Compiling Intelligence Report", duration: 600 }
 ];
 
 export function usePhishingScanner(addToast: (msg: string, type: "success" | "error" | "info") => void) {
@@ -25,24 +25,26 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
     setScanStepIndex
   } = usePhishingContext();
 
+  const { authFetch, isAuthenticated } = useAuth();
   const stepTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // Load history from backend on mount
-  useEffect(() => {
-    const fetchHistory = async () => {
-      try {
-        const API_BASE = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || "http://localhost:8000";
-        const res = await fetch(`${API_BASE}/api/history`);
-        if (res.ok) {
-          const data = await res.json();
-          setHistory(data);
-        }
-      } catch (err) {
-        console.error("Failed to load history from backend:", err);
+  // Load history from backend whenever auth status changes
+  const fetchHistory = async () => {
+    try {
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+      const res = await authFetch(`${API_BASE}/api/history`);
+      if (res.ok) {
+        const data = await res.json();
+        setHistory(data);
       }
-    };
+    } catch (err) {
+      console.error("Failed to load history from backend:", err);
+    }
+  };
+
+  useEffect(() => {
     fetchHistory();
-  }, [setHistory]);
+  }, [isAuthenticated, setHistory]);
 
   const handleAnalyze = async (type: "url" | "email_text" | "email_header", content: string) => {
     setIsLoading(true);
@@ -60,8 +62,8 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
     progressSteps(0);
 
     try {
-      const API_BASE = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || "http://localhost:8000";
-      const response = await fetch(`${API_BASE}/api/analyze`, {
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+      const response = await authFetch(`${API_BASE}/api/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -80,32 +82,48 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
       
       clearTimeout(stepTimerRef.current);
       setScanStepIndex(SCANNING_STEPS.length - 1);
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 250));
       
       setActiveResponse(data);
-      addToast(`Threat Scan completed successfully. Threat Level: ${data.status.toUpperCase()}`, "success");
+      addToast(`Threat Scan Complete: Classification ${data.status.toUpperCase()} (${data.risk_score}/100)`, "success");
 
-      // Add to context history (backend already saved it, but we can optimistically add it)
-      const previewText = content.length > 55 ? content.substring(0, 55) + "..." : content;
-      const historyItem: FullHistoryItem = {
-        id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
-        timestamp: new Date().toISOString(),
-        input_type: type,
-        content: previewText,
-        risk_score: data.risk_score,
-        status: data.status,
-        response: data
-      };
-      setHistory([historyItem, ...history.slice(0, 29)]);
+      // Refetch history from backend to ensure synchronization
+      fetchHistory();
     } catch (err: any) {
       console.error(err);
       clearTimeout(stepTimerRef.current);
       setError(err.message || "Could not connect to the backend server.");
-      addToast("Threat inspection scan failed.", "error");
+      addToast(err.message || "Threat inspection scan failed.", "error");
     } finally {
       setIsLoading(false);
     }
   };
 
-  return { handleAnalyze };
+  const handleClearHistory = async () => {
+    try {
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+      const res = await authFetch(`${API_BASE}/api/history`, { method: "DELETE" });
+      if (res.ok) {
+        setHistory([]);
+        addToast("Threat scan vault history cleared.", "info");
+      }
+    } catch (err) {
+      console.error("Failed to clear history:", err);
+    }
+  };
+
+  const handleDeleteSingle = async (id: string) => {
+    try {
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+      const res = await authFetch(`${API_BASE}/api/history/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setHistory(history.filter(item => item.id !== id));
+        addToast("Record deleted from vault.", "info");
+      }
+    } catch (err) {
+      console.error("Failed to delete record:", err);
+    }
+  };
+
+  return { handleAnalyze, handleClearHistory, handleDeleteSingle };
 }

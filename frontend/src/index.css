@@ -1,72 +1,97 @@
-/* Import Modern Sans-Serif Fonts from Google */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap');
-
 @import "tailwindcss";
 
 :root {
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
   color-scheme: dark;
+
+  /* Design Tokens */
+  --bg-root: #080c14;
+  --surface-base: #0f172a;
+  --surface-panel: #131c31;
+  --surface-elevated: #1a243d;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-tactical: rgba(255, 255, 255, 0.14);
+  --border-active: #00f0ff;
+
+  --threat-danger: #ff3366;
+  --threat-warning: #ffb800;
+  --threat-safe: #00e699;
+  --threat-cyan: #00f0ff;
 }
 
-h1, h2, h3, h4, h5, h6 {
-  font-family: 'Outfit', sans-serif;
+body {
+  background-color: var(--bg-root);
+  color: #f8fafc;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  overflow-x: hidden;
 }
 
-/* Custom Scrollbar for sleek UI feel */
+/* Technical Monospace Elements */
+.font-mono, code, pre, kbd {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Custom Tactical Scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(10, 15, 30, 0.5);
+  background: #080c14;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(0, 240, 255, 0.4);
 }
 
-/* Glassmorphism Classes */
-.glass-panel {
-  background: rgba(13, 17, 30, 0.65);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+/* Tactical Panel Utilities */
+.tactical-panel {
+  background: #0f172a;
   border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
 }
 
-.glass-panel-hover {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+.tactical-panel-hover {
+  transition: border-color 0.2s ease, background-color 0.2s ease;
 }
-.glass-panel-hover:hover {
-  background: rgba(18, 24, 43, 0.8);
-  border-color: rgba(255, 255, 255, 0.15);
-  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.7);
+.tactical-panel-hover:hover {
+  background: #131c31;
+  border-color: rgba(255, 255, 255, 0.18);
 }
 
-.glass-input {
-  background: rgba(8, 10, 20, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  transition: all 0.25s ease;
+.tactical-input {
+  background: #090d16;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f8fafc;
+  border-radius: 4px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.glass-input:focus {
-  border-color: rgba(59, 130, 246, 0.5);
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+.tactical-input:focus, .tactical-input:focus-visible {
+  border-color: #00f0ff;
+  box-shadow: 0 0 0 2px rgba(0, 240, 255, 0.2);
   outline: none;
 }
 
-/* Core scanlines and animated background meshes */
-.bg-mesh {
-  background-color: #030611;
+/* High-Contrast Accessible Focus Rings */
+:focus-visible {
+  outline: 2px solid #00f0ff;
+  outline-offset: 2px;
+}
+
+/* Background Subtle Tactical Grid */
+.bg-tactical-grid {
+  background-color: #080c14;
   background-image: 
-    radial-gradient(at 10% 20%, rgba(16, 24, 48, 0.3) 0px, transparent 50%),
-    radial-gradient(at 90% 10%, rgba(29, 78, 216, 0.1) 0px, transparent 50%),
-    radial-gradient(at 50% 80%, rgba(6, 182, 212, 0.08) 0px, transparent 50%);
+    linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 32px 32px;
   background-attachment: fixed;
 }
 
-/* Keyframes for futuristic radar/scanning grids */
+/* Scanning Radar Line Animation */
 @keyframes radar-scan {
   0% {
     transform: translateY(-100%);
@@ -81,51 +106,34 @@ h1, h2, h3, h4, h5, h6 {
   }
 }
 
-.scan-line {
+.scan-line-tactical {
   position: absolute;
   left: 0;
   right: 0;
-  height: 4px;
-  background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.4), rgba(59, 130, 246, 0.8), rgba(6, 182, 212, 0.4), transparent);
-  animation: radar-scan 2.5s linear infinite;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(0, 240, 255, 0.8), transparent);
+  animation: radar-scan 2s linear infinite;
   pointer-events: none;
 }
 
-/* Custom HSL-based glow colors */
-.glow-safe {
-  box-shadow: 0 0 20px -2px rgba(34, 197, 94, 0.2);
+/* Threat Status Indicators */
+.badge-danger {
+  background: rgba(255, 51, 102, 0.12);
+  border: 1px solid rgba(255, 51, 102, 0.3);
+  color: #ff3366;
 }
-.glow-warning {
-  box-shadow: 0 0 20px -2px rgba(245, 158, 11, 0.2);
+.badge-warning {
+  background: rgba(255, 184, 0, 0.12);
+  border: 1px solid rgba(255, 184, 0, 0.3);
+  color: #ffb800;
 }
-.glow-danger {
-  box-shadow: 0 0 20px -2px rgba(239, 68, 68, 0.2);
+.badge-safe {
+  background: rgba(0, 230, 153, 0.12);
+  border: 1px solid rgba(0, 230, 153, 0.3);
+  color: #00e699;
 }
-
-/* Custom text and background gradient utilities */
-.text-gradient {
-  background: linear-gradient(135deg, #ffffff 30%, #a5b4fc 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.accent-cyan {
-  color: #22d3ee;
-}
-.accent-blue {
-  color: #60a5fa;
-}
-.accent-green {
-  color: #4ade80;
-}
-.accent-amber {
-  color: #fbbf24;
-}
-.accent-red {
-  color: #f87171;
-}
-
-/* Speed indicator transitions */
-.transition-slow {
-  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+.badge-cyan {
+  background: rgba(0, 240, 255, 0.12);
+  border: 1px solid rgba(0, 240, 255, 0.3);
+  color: #00f0ff;
 }

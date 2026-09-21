@@ -3,21 +3,24 @@ import { Header } from "./components/Header";
 import { AnalyzerInput } from "./components/AnalyzerInput";
 import { RiskGauge } from "./components/RiskGauge";
 import { SignalList } from "./components/SignalList";
+import { ThreatRadar } from "./components/ThreatRadar";
 import { LlmReport } from "./components/LlmReport";
 import { HistoryTracker } from "./components/HistoryTracker";
 import { SettingsModal } from "./components/SettingsModal";
+import { AuthModal } from "./components/AuthModal";
 import { Toast } from "./components/Toast";
 import type { ToastItem } from "./components/Toast";
 import type { ScanHistoryItem } from "./types";
-import { ShieldCheck, ShieldAlert, Terminal } from "lucide-react";
+import { ShieldCheck, ShieldAlert, Terminal, Activity, Database } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import GlassSurface from "./components/GlassSurface";
 
 import { usePhishingContext } from "./context/PhishingContext";
 import { usePhishingScanner, SCANNING_STEPS } from "./hooks/usePhishingScanner";
 
 export default function App() {
   const {
-    history, setHistory,
+    history,
     apiKey, setApiKey,
     isLoading,
     error, setError,
@@ -25,7 +28,7 @@ export default function App() {
     scanStepIndex
   } = usePhishingContext();
 
-  // Settings Modal & Toasts
+  // Modals & Toasts
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [backendGeminiConfigured, setBackendGeminiConfigured] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -43,24 +46,31 @@ export default function App() {
     setApiKey(newKey);
   };
 
-  const { handleAnalyze } = usePhishingScanner(addToast);
+  const { handleAnalyze, handleClearHistory, handleDeleteSingle } = usePhishingScanner(addToast);
 
   const handleSelectHistoryItem = (item: ScanHistoryItem) => {
-    const fullItem = history.find((h) => h.id === item.id);
-    if (fullItem) {
-      setActiveResponse(fullItem.response);
+    if (item.response) {
+      setActiveResponse(item.response);
       setError(null);
-      addToast("Loaded scan from history logs.", "info");
+      addToast("Loaded threat telemetry from vault.", "info");
+    } else {
+      const fullItem = history.find((h) => h.id === item.id);
+      if (fullItem && fullItem.response) {
+        setActiveResponse(fullItem.response);
+        setError(null);
+        addToast("Loaded threat telemetry from vault.", "info");
+      }
     }
   };
 
-  const handleClearHistory = () => {
-    setHistory([]);
-    addToast("Scan history cleared successfully.", "info");
-  };
+  // Telemetry Metrics
+  const totalScans = history.length;
+  const criticalThreats = history.filter(h => h.status === "danger").length;
+  const moderateThreats = history.filter(h => h.status === "warning").length;
+  const cleanScans = history.filter(h => h.status === "safe").length;
 
   return (
-    <div className="bg-mesh min-h-screen text-slate-100 p-4 md:p-8 selection:bg-blue-600/30 selection:text-white">
+    <div className="bg-tactical-grid min-h-screen text-slate-100 p-4 md:p-6 font-sans">
       <div className="max-w-7xl mx-auto">
         {/* Header Navigation */}
         <Header 
@@ -68,63 +78,113 @@ export default function App() {
           userApiKey={apiKey}
           backendGeminiConfigured={backendGeminiConfigured}
           setBackendGeminiConfigured={setBackendGeminiConfigured}
+          onAddToast={addToast}
         />
 
-        {/* Global Error Banner */}
-        {error && (
-          <div className="mb-6 p-4 rounded-xl bg-red-950/30 border border-red-500/20 text-red-300 text-xs font-mono flex items-center gap-3 animate-in fade-in duration-300">
-            <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-red-500/10 border border-red-500/20 flex items-center justify-center">
-              <ShieldAlert className="w-4 h-4 text-red-400" />
+        {/* Global Security Metrics Bar */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+          <GlassSurface width="100%" height={70} borderRadius={8} brightness={30} opacity={0.7} className="tactical-panel border border-white/10">
+            <div className="flex items-center gap-3 w-full px-3">
+              <div className="p-2 rounded bg-[#00F0FF]/10 border border-[#00F0FF]/20 text-[#00F0FF]">
+                <Database className="w-4 h-4" />
+              </div>
+              <div className="text-left">
+                <p className="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Vault Scans</p>
+                <p className="text-base font-bold font-mono text-white">{totalScans}</p>
+              </div>
             </div>
+          </GlassSurface>
+
+          <GlassSurface width="100%" height={70} borderRadius={8} brightness={30} opacity={0.7} className="tactical-panel border border-white/10">
+            <div className="flex items-center gap-3 w-full px-3">
+              <div className="p-2 rounded bg-[#FF3366]/10 border border-[#FF3366]/20 text-[#FF3366]">
+                <ShieldAlert className="w-4 h-4" />
+              </div>
+              <div className="text-left">
+                <p className="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Critical Threats</p>
+                <p className="text-base font-bold font-mono text-[#FF3366]">{criticalThreats}</p>
+              </div>
+            </div>
+          </GlassSurface>
+
+          <GlassSurface width="100%" height={70} borderRadius={8} brightness={30} opacity={0.7} className="tactical-panel border border-white/10">
+            <div className="flex items-center gap-3 w-full px-3">
+              <div className="p-2 rounded bg-[#FFB800]/10 border border-[#FFB800]/20 text-[#FFB800]">
+                <Activity className="w-4 h-4" />
+              </div>
+              <div className="text-left">
+                <p className="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Warnings</p>
+                <p className="text-base font-bold font-mono text-[#FFB800]">{moderateThreats}</p>
+              </div>
+            </div>
+          </GlassSurface>
+
+          <GlassSurface width="100%" height={70} borderRadius={8} brightness={30} opacity={0.7} className="tactical-panel border border-white/10">
+            <div className="flex items-center gap-3 w-full px-3">
+              <div className="p-2 rounded bg-[#00E699]/10 border border-[#00E699]/20 text-[#00E699]">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+              <div className="text-left">
+                <p className="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Verified Clean</p>
+                <p className="text-base font-bold font-mono text-[#00E699]">{cleanScans}</p>
+              </div>
+            </div>
+          </GlassSurface>
+        </div>
+
+        {/* Global Gateway Alert */}
+        {error && (
+          <div className="mb-5 p-3.5 rounded bg-[#FF3366]/10 border border-[#FF3366]/30 text-[#FF3366] text-xs font-mono flex items-center gap-3 text-left">
+            <ShieldAlert className="w-4 h-4 text-[#FF3366] flex-shrink-0" />
             <div>
-              <p className="font-bold">SECURITY GATEWAY ERROR</p>
-              <p className="text-slate-400 mt-0.5">{error}</p>
+              <p className="font-bold uppercase tracking-wider">SECURITY GATEWAY ALERT</p>
+              <p className="text-slate-300 mt-0.5">{error}</p>
             </div>
           </div>
         )}
 
-        {/* Workspace Layout Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        {/* Workspace Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
           
-          {/* Left Column: Inputs & History (Span 5) */}
-          <div className="lg:col-span-5 space-y-8">
+          {/* Left Column: Console & History Vault */}
+          <div className="lg:col-span-5 space-y-5">
             <AnalyzerInput onAnalyze={handleAnalyze} isLoading={isLoading} />
             <HistoryTracker 
               history={history} 
               onSelect={handleSelectHistoryItem} 
-              onClear={handleClearHistory} 
+              onClear={handleClearHistory}
+              onDeleteSingle={handleDeleteSingle}
             />
           </div>
 
-          {/* Right Column: Visualization & Reports (Span 7) */}
+          {/* Right Column: Telemetry & Report Inspector */}
           <div className="lg:col-span-7">
             <AnimatePresence mode="wait">
               {isLoading ? (
-                /* Cinematic Scanning Overlay */
+                /* Scanning HUD Indicator */
                 <motion.div
                   key="loading"
                   initial={{ opacity: 0, scale: 0.98 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.98 }}
-                  className="glass-panel p-8 rounded-2xl flex flex-col items-center justify-center text-center shadow-3xl min-h-[500px] border-blue-500/20 relative overflow-hidden"
+                  className="tactical-panel p-8 rounded flex flex-col items-center justify-center text-center min-h-[500px] border border-[#00F0FF]/30 relative overflow-hidden"
                 >
-                  <div className="scan-line" />
+                  <div className="scan-line-tactical" />
                   
-                  {/* Radar Ring Visual */}
-                  <div className="relative w-20 h-20 flex items-center justify-center mb-8">
-                    <div className="absolute inset-0 rounded-full border border-blue-500/20 animate-ping opacity-60" />
-                    <div className="absolute inset-2 rounded-full border border-cyan-500/30 animate-[spin_6s_linear_infinite]" />
-                    <div className="w-12 h-12 rounded-xl bg-slate-950 border border-blue-500/30 flex items-center justify-center relative z-10 glow-safe">
-                      <Terminal className="w-5 h-5 text-cyan-400 animate-pulse" />
+                  <div className="relative w-16 h-16 flex items-center justify-center mb-5">
+                    <div className="absolute inset-0 rounded-full border border-[#00F0FF]/30 animate-ping" />
+                    <div className="w-10 h-10 rounded bg-[#090D16] border border-[#00F0FF]/40 flex items-center justify-center relative z-10">
+                      <Terminal className="w-5 h-5 text-[#00F0FF] animate-pulse" />
                     </div>
                   </div>
 
-                  <h3 className="text-sm font-bold text-white font-mono uppercase tracking-widest animate-pulse">
-                    Threat Cyber-Inspection Active
+                  <h3 className="text-sm font-bold text-white font-mono uppercase tracking-widest">
+                    EXECUTING ZERO-TRUST SCAN
                   </h3>
+                  <p className="text-xs text-slate-400 font-mono mt-1">Multi-vector heuristic extraction active</p>
                   
-                  {/* Step-by-Step Progress Checkmarks */}
-                  <div className="mt-8 space-y-3.5 max-w-sm w-full text-left bg-slate-950/45 p-5 rounded-2xl border border-white/5 font-mono text-[11px]">
+                  {/* Scanning Checklist */}
+                  <div className="mt-6 space-y-2.5 max-w-sm w-full text-left bg-[#090D16] p-4 rounded border border-white/10 font-mono text-[11px]">
                     {SCANNING_STEPS.map((step, idx) => {
                       const isDone = scanStepIndex > idx;
                       const isActive = scanStepIndex === idx;
@@ -132,8 +192,8 @@ export default function App() {
                       return (
                         <div
                           key={idx}
-                          className={`flex items-center justify-between gap-3 transition-colors duration-200 ${
-                            isDone ? "text-green-400 font-bold" : isActive ? "text-cyan-400 font-bold" : "text-slate-500"
+                          className={`flex items-center justify-between gap-3 ${
+                            isDone ? "text-[#00E699] font-bold" : isActive ? "text-[#00F0FF] font-bold" : "text-slate-500"
                           }`}
                         >
                           <span className="truncate pr-2">{step.label}</span>
@@ -141,10 +201,7 @@ export default function App() {
                             {isDone ? (
                               "✓ COMPLETE"
                             ) : isActive ? (
-                              <span className="flex items-center gap-1">
-                                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
-                                RUNNING...
-                              </span>
+                              "SCANNING..."
                             ) : (
                               "PENDING"
                             )}
@@ -155,76 +212,44 @@ export default function App() {
                   </div>
                 </motion.div>
               ) : activeResponse ? (
-                /* Results Dashboard Visuals */
+                /* Live Telemetry Inspector */
                 <motion.div
                   key="results"
-                  initial={{ opacity: 0, y: 15 }}
+                  initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -15 }}
-                  transition={{ duration: 0.35, ease: "easeOut" }}
-                  className="space-y-8"
+                  exit={{ opacity: 0, y: -10 }}
+                  transition={{ duration: 0.25 }}
+                  className="space-y-5"
                 >
-                  <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
-                    <div className="md:col-span-5">
-                      <RiskGauge score={activeResponse.risk_score} status={activeResponse.status} />
-                    </div>
-                    <div className="md:col-span-7">
-                      <SignalList signals={activeResponse.phishing_signals} analysisData={activeResponse} />
-                    </div>
+                  {/* Gauge & Radar Grid */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    <RiskGauge score={activeResponse.risk_score} status={activeResponse.status} />
+                    <ThreatRadar response={activeResponse} />
                   </div>
 
-                  <div className="w-full">
-                    <LlmReport explanation={activeResponse.ai_explanation} />
-                  </div>
+                  {/* Signal Breakdown List */}
+                  <SignalList signals={activeResponse.phishing_signals} />
 
-                  {activeResponse.details && Object.keys(activeResponse.details).length > 0 && (
-                    <div className="glass-panel p-5 rounded-2xl text-left border-white/5">
-                      <div className="flex items-center gap-2 border-b border-white/5 pb-2 mb-3">
-                        <Terminal className="w-4 h-4 text-slate-400" />
-                        <h4 className="text-[10px] font-bold font-mono text-slate-400 uppercase tracking-widest">
-                          Technical Inspection Metadata
-                        </h4>
-                      </div>
-                      <pre className="text-[10px] font-mono text-slate-400 bg-slate-950/40 p-3 rounded-lg overflow-x-auto max-h-[150px] leading-relaxed">
-                        {JSON.stringify(activeResponse.details, null, 2)}
-                      </pre>
-                    </div>
-                  )}
+                  {/* AI Report Inspector */}
+                  <LlmReport explanation={activeResponse.ai_explanation} onAddToast={addToast} />
                 </motion.div>
               ) : (
-                /* Awaiting Input Visuals */
+                /* Empty Telemetry State */
                 <motion.div
                   key="empty"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="glass-panel p-12 rounded-2xl flex flex-col items-center justify-center text-center shadow-2xl min-h-[500px]"
+                  className="tactical-panel p-12 rounded flex flex-col items-center justify-center text-center min-h-[460px] border border-white/10"
                 >
-                  <div className="w-14 h-14 rounded-2xl bg-slate-950 border border-white/5 flex items-center justify-center mb-6 shadow-inner">
-                    <ShieldCheck className="w-7 h-7 text-slate-500 animate-pulse" />
+                  <div className="w-12 h-12 rounded bg-[#00F0FF]/10 border border-[#00F0FF]/30 flex items-center justify-center mb-4">
+                    <ShieldCheck className="w-6 h-6 text-[#00F0FF]" />
                   </div>
-                  
-                  <h3 className="text-sm font-bold text-slate-300 font-mono uppercase tracking-widest">
-                    Awaiting Inspection Input
+                  <h3 className="text-base font-bold text-white font-mono uppercase tracking-wider">
+                    SOC Threat Intelligence Gateway
                   </h3>
-                  <p className="text-xs text-slate-500 mt-2 max-w-sm leading-relaxed">
-                    Input a website domain address, email text body content, or email protocol header block to verify security indexes and generate explanations.
+                  <p className="text-xs text-slate-400 font-mono mt-1 max-w-md">
+                    Select an input vector on the left console (URL, Email Body, or MIME Header) and execute a threat scan to view real-time risk assessment and AI briefings.
                   </p>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-8 max-w-md w-full">
-                    <div className="p-3 rounded-xl bg-slate-950/30 border border-white/5 text-left">
-                      <span className="text-[9px] font-mono font-bold text-slate-400 block mb-1">STEP 1</span>
-                      <span className="text-[11px] text-slate-500 leading-normal">Paste your content or select a sample case.</span>
-                    </div>
-                    <div className="p-3 rounded-xl bg-slate-950/30 border border-white/5 text-left">
-                      <span className="text-[9px] font-mono font-bold text-slate-400 block mb-1">STEP 2</span>
-                      <span className="text-[11px] text-slate-500 leading-normal">Heuristics identify spoofs and domain typo signatures.</span>
-                    </div>
-                    <div className="p-3 rounded-xl bg-slate-950/30 border border-white/5 text-left">
-                      <span className="text-[9px] font-mono font-bold text-slate-400 block mb-1">STEP 3</span>
-                      <span className="text-[11px] text-slate-500 leading-normal">AI engine explains tactics and risk rating.</span>
-                    </div>
-                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -232,8 +257,8 @@ export default function App() {
         </div>
       </div>
 
-      {/* Centered Centered Settings Modal */}
-      <SettingsModal 
+      {/* Settings Modal */}
+      <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         userApiKey={apiKey}
@@ -241,7 +266,10 @@ export default function App() {
         onAddToast={addToast}
       />
 
-      {/* Floating Toast Notification Portal */}
+      {/* Auth Modal */}
+      <AuthModal onAddToast={addToast} />
+
+      {/* Toast Notification Container */}
       <Toast toasts={toasts} onClose={removeToast} />
     </div>
   );

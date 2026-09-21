@@ -8,7 +8,6 @@ interface RiskGaugeProps {
 export const RiskGauge: React.FC<RiskGaugeProps> = ({ score, status }) => {
   const [animatedScore, setAnimatedScore] = useState(0);
 
-  // Animate the score counter on change
   useEffect(() => {
     let start = 0;
     const end = score;
@@ -17,7 +16,7 @@ export const RiskGauge: React.FC<RiskGaugeProps> = ({ score, status }) => {
       return;
     }
 
-    const duration = 800; // ms
+    const duration = 600;
     const increment = end > start ? 1 : -1;
     const stepTime = Math.abs(Math.floor(duration / (end - start)));
     
@@ -27,114 +26,90 @@ export const RiskGauge: React.FC<RiskGaugeProps> = ({ score, status }) => {
       if (start === end) {
         clearInterval(timer);
       }
-    }, Math.max(stepTime, 8)); // Cap minimum duration step at 8ms
+    }, Math.max(stepTime, 6));
 
     return () => clearInterval(timer);
   }, [score]);
 
-  // Color config based on status
-  const getColorScheme = () => {
+  const getStatusTokens = () => {
     switch (status) {
       case "safe":
         return {
-          stroke: "#22c55e",
-          glow: "rgba(34,197,94,0.35)",
-          text: "text-green-400",
-          bg: "bg-green-500/10 border-green-500/20"
+          color: "#00E699",
+          badgeClass: "badge-safe",
+          label: "CLEAN / LOW RISK"
         };
       case "warning":
         return {
-          stroke: "#f59e0b",
-          glow: "rgba(245,158,11,0.35)",
-          text: "text-amber-400",
-          bg: "bg-amber-500/10 border-amber-500/20"
+          color: "#FFB800",
+          badgeClass: "badge-warning",
+          label: "SUSPICIOUS / WARNING"
         };
       case "danger":
         return {
-          stroke: "#ef4444",
-          glow: "rgba(239,68,68,0.35)",
-          text: "text-red-400",
-          bg: "bg-red-500/10 border-red-500/20"
+          color: "#FF3366",
+          badgeClass: "badge-danger",
+          label: "CRITICAL / THREAT CONFIRMED"
         };
       default:
         return {
-          stroke: "#3b82f6",
-          glow: "rgba(59,130,246,0.35)",
-          text: "text-blue-400",
-          bg: "bg-blue-500/10 border-blue-500/20"
+          color: "#00F0FF",
+          badgeClass: "badge-cyan",
+          label: "INSPECTING..."
         };
     }
   };
 
-  const scheme = getColorScheme();
+  const tokens = getStatusTokens();
 
-  // SVG Gauge calculations
-  const radius = 80;
+  const radius = 75;
   const strokeWidth = 10;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (animatedScore / 100) * circumference;
 
   return (
-    <div className="flex flex-col items-center justify-center p-6 glass-panel rounded-2xl relative overflow-hidden h-full shadow-2xl">
-      <div className="relative w-48 h-48 flex items-center justify-center">
-        {/* Animated Cyber Target Outer Ring */}
-        <div className="absolute inset-0 rounded-full border border-dashed border-white/10 animate-[spin_40s_linear_infinite]" />
-        <div 
-          className="absolute inset-2 rounded-full border border-double border-white/5" 
-          style={{ boxShadow: `inset 0 0 15px ${scheme.glow}` }}
-        />
+    <div className="tactical-panel p-5 rounded border border-white/10 flex flex-col items-center justify-center text-center h-full">
+      <div className="relative w-44 h-44 flex items-center justify-center">
+        {/* Outer Grid Tick Ring */}
+        <div className="absolute inset-0 rounded-full border border-dashed border-white/10" />
         
-        {/* SVG Radial Progress */}
-        <svg className="w-full h-full transform -rotate-90 relative z-10" viewBox="0 0 200 200">
-          <defs>
-            <filter id="glow-effect" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="6" result="blur" />
-              <feMerge>
-                <feMergeNode in="blur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-          </defs>
-          
-          {/* Base track */}
+        {/* SVG Radial Gauge */}
+        <svg className="w-full h-full transform -rotate-90 relative z-10" viewBox="0 0 190 190">
           <circle
-            cx="100"
-            cy="100"
+            cx="95"
+            cy="95"
             r={radius}
             fill="transparent"
-            stroke="rgba(255, 255, 255, 0.03)"
+            stroke="rgba(255, 255, 255, 0.05)"
             strokeWidth={strokeWidth}
           />
-          
-          {/* Active progress track */}
           <circle
-            cx="100"
-            cy="100"
+            cx="95"
+            cy="95"
             r={radius}
             fill="transparent"
-            stroke={scheme.stroke}
+            stroke={tokens.color}
             strokeWidth={strokeWidth}
             strokeDasharray={circumference}
             strokeDashoffset={strokeDashoffset}
-            strokeLinecap="round"
-            filter="url(#glow-effect)"
-            style={{ transition: "stroke-dashoffset 0.5s ease-out, stroke 0.5s ease" }}
+            strokeLinecap="butt"
+            style={{ transition: "stroke-dashoffset 0.4s ease-out, stroke 0.4s ease" }}
           />
         </svg>
 
-        {/* Center Text (Score Display) */}
-        <div className="absolute flex flex-col items-center justify-center text-center z-20">
-          <span className="text-[10px] font-mono tracking-widest text-slate-400 font-bold uppercase">Risk Score</span>
-          <span className={`text-4xl font-extrabold tracking-tighter font-mono ${scheme.text}`}>
+        {/* Center Telemetry Display */}
+        <div className="absolute flex flex-col items-center justify-center z-20">
+          <span className="text-[10px] font-mono tracking-widest text-slate-400 uppercase font-bold">Threat Index</span>
+          <span className="text-4xl font-extrabold font-mono tracking-tighter" style={{ color: tokens.color }}>
             {animatedScore}
           </span>
-          <span className="text-[10px] font-mono text-slate-500 font-bold">/ 100</span>
+          <span className="text-[10px] font-mono text-slate-500 font-bold">/ 100 SCORE</span>
         </div>
       </div>
 
-      {/* Status Alert Badge */}
-      <div className={`mt-6 px-5 py-2 rounded-xl border text-center font-mono font-bold tracking-widest uppercase text-xs transition-slow ${scheme.bg} ${scheme.text}`}>
-        Threat: {status}
+      {/* Threat Status Badge */}
+      <div className={`mt-4 px-4 py-1.5 rounded text-center font-mono font-bold tracking-wider uppercase text-xs ${tokens.badgeClass}`}>
+        {tokens.label}
       </div>
     </div>
   );

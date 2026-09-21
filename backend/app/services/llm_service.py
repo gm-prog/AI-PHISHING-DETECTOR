@@ -42,7 +42,7 @@ Format the 'ai_explanation' field strictly in beautiful Markdown, including bull
 
 def verify_gemini_key(api_key: str) -> Dict[str, Any]:
     """
-    Validates a Gemini API key by making a lightweight query.
+    Validates a Gemini API key by making a lightweight query using Gemini 3.6 Flash via Interactions API.
     Returns {"valid": True} or {"valid": False, "error": str} with descriptive error details.
     """
     if not api_key or not api_key.strip():
@@ -50,21 +50,25 @@ def verify_gemini_key(api_key: str) -> Dict[str, Any]:
         
     try:
         client = genai.Client(api_key=api_key.strip())
-        # Make a tiny lightweight call to check validity
-        client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents='Verify connection test.'
-        )
+        # Make a tiny lightweight call check using Interactions API with gemini-3.6-flash
+        if hasattr(client, "interactions"):
+            client.interactions.create(
+                model='models/gemini-3.6-flash',
+                input='Verify connection test.'
+            )
+        else:
+            client.models.generate_content(
+                model='models/gemini-3.6-flash',
+                contents='Verify connection test.'
+            )
         logger.info("[SECURE] Gemini API key verified successfully.")
         return {"valid": True}
-    except APIError as e:
-        error_msg = f"Gemini API authentication failed: {e.message} (Status Code: {e.code})"
+    except (APIError, Exception) as e:
+        error_str = str(e)
+        message = getattr(e, 'message', error_str)
+        error_msg = f"Gemini API authentication failed: {message}"
         logger.error(f"[API ERROR] {error_msg}")
-        return {"valid": False, "error": e.message}
-    except Exception as e:
-        error_msg = f"Network or unexpected error verifying API key: {str(e)}"
-        logger.error(f"[SYSTEM ERROR] {error_msg}\n{traceback.format_exc()}")
-        return {"valid": False, "error": str(e)}
+        return {"valid": False, "error": message}
 
 def get_fallback_analysis(input_type: str, content: str, heuristic_score: int, heuristic_signals: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Provides a graceful fallback report when Gemini API is unavailable or unconfigured."""
@@ -118,7 +122,7 @@ def analyze_with_llm(
     heuristic_signals: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
     """
-    Calls the Gemini API to analyze the phishing context.
+    Calls the Gemini API using models/gemini-3.6-flash and Interactions API to analyze the phishing context.
     Falls back to heuristic reporting if the API call fails or key is missing.
     """
     if not api_key:
@@ -146,21 +150,51 @@ Heuristics Detected by Rules:
 Please analyze this input and provide the final risk score, status classification, merged warning signals, and your detailed AI report in markdown.
 """
         
-        # Run content generation with strict response schema mapping
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=LlmPhishingAnalysisSchema,
-                system_instruction=SYSTEM_INSTRUCTION,
-                temperature=0.2
+        raw_text = ""
+        # Primary method: Use Interactions API with models/gemini-3.6-flash
+        if hasattr(client, "interactions"):
+            try:
+                interaction = client.interactions.create(
+                    model='models/gemini-3.6-flash',
+                    input=prompt,
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=LlmPhishingAnalysisSchema
+                )
+                if hasattr(interaction, "output_text") and interaction.output_text:
+                    raw_text = interaction.output_text
+                elif hasattr(interaction, "text") and interaction.text:
+                    raw_text = interaction.text
+                else:
+                    raw_text = str(interaction)
+            except Exception as interaction_err:
+                logger.warning(f"Interactions API call failed, falling back to generate_content: {interaction_err}")
+                response = client.models.generate_content(
+                    model='models/gemini-3.6-flash',
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=LlmPhishingAnalysisSchema,
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        temperature=0.2
+                    )
+                )
+                raw_text = response.text
+        else:
+            response = client.models.generate_content(
+                model='models/gemini-3.6-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=LlmPhishingAnalysisSchema,
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=0.2
+                )
             )
-        )
+            raw_text = response.text
         
         # Parse the JSON response
         import re
-        raw_text = response.text
         # Strip potential markdown code blocks
         clean_text = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw_text.strip(), flags=re.IGNORECASE)
         result_json = json.loads(clean_text)

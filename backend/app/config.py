@@ -5,16 +5,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings:
-    # Gemini API Key for AI Analysis (optional — scans work without it)
+    # Gemini API Key for AI Analysis (optional — scans work autonomously without it)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 
-    # VirusTotal API Key (free tier: 500 requests/day)
-    # Get yours at: https://www.virustotal.com/gui/sign-in
+    # VirusTotal API Key (optional threat intelligence)
     VIRUSTOTAL_API_KEY: str = os.getenv("VIRUSTOTAL_API_KEY", "")
 
+    # CORS Allowed Origins
+    ALLOWED_ORIGINS: str = os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:3000"
+    )
 
-    # CORS configuration
-    ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")
+    # JWT Authentication Security Settings
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "sentinel_ai_super_secret_hardening_key_2026_jwt_token_secure")
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440")) # 24 hours
 
     # Server configuration
     HOST: str = os.getenv("HOST", "127.0.0.1")

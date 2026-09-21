@@ -1,3 +1,29 @@
+export interface User {
+  id: string;
+  email: string;
+  role: "user" | "admin";
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface AuthState {
+  user: User | null;
+  token: string | null;
+  isAuthenticated: boolean;
+  isLoading: boolean;
+}
+
+export interface EngineHealth {
+  status: string;
+  api_active: boolean;
+  engine_mode: string;
+  gemini_configured: boolean;
+  virustotal_configured: boolean;
+  urlhaus_configured: boolean;
+  version: string;
+  message: string;
+}
+
 export interface PhishingSignal {
   id: string;
   severity: "low" | "medium" | "high";
@@ -72,10 +98,11 @@ export interface AnalysisResponse {
 
 export interface ScanHistoryItem {
   id: string;
+  user_id?: string | null;
   timestamp: string;
   input_type: "url" | "email_text" | "email_header";
   content: string;
   risk_score: number;
   status: "safe" | "warning" | "danger";
+  response?: AnalysisResponse;
 }
-

@@ -45,3 +45,5 @@ dist-ssr/
 .DS_Store
 
 backend/phishing_detector.db
+*.db
+*.sqlite
