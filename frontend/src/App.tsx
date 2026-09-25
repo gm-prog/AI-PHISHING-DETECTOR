@@ -21,7 +21,6 @@ import { usePhishingScanner, SCANNING_STEPS } from "./hooks/usePhishingScanner";
 export default function App() {
   const {
     history,
-    apiKey, setApiKey,
     isLoading,
     error, setError,
     activeResponse, setActiveResponse,
@@ -40,10 +39,6 @@ export default function App() {
 
   const removeToast = (id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  const handleApiKeyChange = (newKey: string) => {
-    setApiKey(newKey);
   };
 
   const { handleAnalyze, handleClearHistory, handleDeleteSingle } = usePhishingScanner(addToast);
@@ -75,7 +70,6 @@ export default function App() {
         {/* Header Navigation */}
         <Header 
           onOpenSettings={() => setIsSettingsOpen(true)} 
-          userApiKey={apiKey}
           backendGeminiConfigured={backendGeminiConfigured}
           setBackendGeminiConfigured={setBackendGeminiConfigured}
           onAddToast={addToast}
@@ -261,8 +255,6 @@ export default function App() {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        userApiKey={apiKey}
-        onSave={handleApiKeyChange}
         onAddToast={addToast}
       />
 
