@@ -33,6 +33,7 @@ class Settings:
     ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", LOCAL_ORIGINS)
     LLM_MAX_INPUT_CHARS: int = int(os.getenv("LLM_MAX_INPUT_CHARS", "12000"))
     MAX_REQUEST_BODY_BYTES: int = int(os.getenv("MAX_REQUEST_BODY_BYTES", "65536"))
+    RATE_LIMIT_STORAGE_URI: str = os.getenv("RATE_LIMIT_STORAGE_URI", "memory://").strip()
 
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
@@ -53,6 +54,9 @@ if settings.ENVIRONMENT not in {"development", "test", "staging", "production"}:
 
 if settings.ENVIRONMENT == "production" and not os.getenv("ALLOWED_ORIGINS", "").strip():
     raise RuntimeError("ALLOWED_ORIGINS must be explicitly configured in production.")
+
+if settings.ENVIRONMENT == "production" and not settings.RATE_LIMIT_STORAGE_URI.startswith(("redis://", "rediss://")):
+    raise RuntimeError("RATE_LIMIT_STORAGE_URI must use Redis in production.")
 
 parse_allowed_origins(
     settings.ALLOWED_ORIGINS,
