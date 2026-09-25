@@ -95,7 +95,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await ensureCsrfCookie();
       const res = await fetch(`${API_BASE_URL}/api/auth/register`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...csrfHeaders({ method: "POST" }) },
         credentials: "include",
         body: JSON.stringify({ email, password }),
       });
