@@ -8,9 +8,10 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "phishing_detector.db")
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
-# Auto-migrate schema: ensure user_id column exists if table exists
+# Auto-migrate schema for security-sensitive ownership fields.
 def ensure_schema_migrations():
     if os.path.exists(DB_PATH):
+        conn = None
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -19,10 +20,20 @@ def ensure_schema_migrations():
             if columns and "user_id" not in columns:
                 cursor.execute("ALTER TABLE scan_history ADD COLUMN user_id VARCHAR")
                 cursor.execute("CREATE INDEX IF NOT EXISTS ix_scan_history_user_id ON scan_history (user_id)")
-                conn.commit()
-            conn.close()
+            if columns and "guest_session_hash" not in columns:
+                cursor.execute("ALTER TABLE scan_history ADD COLUMN guest_session_hash VARCHAR")
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS ix_scan_history_guest_session_hash "
+                    "ON scan_history (guest_session_hash)"
+                )
+            conn.commit()
         except Exception as e:
             print(f"Migration warning: {e}")
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                conn.close()
 
 ensure_schema_migrations()
 
@@ -40,4 +51,3 @@ def get_db():
         yield db
     finally:
         db.close()
-
