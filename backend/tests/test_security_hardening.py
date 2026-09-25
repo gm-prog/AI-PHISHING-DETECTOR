@@ -236,6 +236,7 @@ def test_admin_route_locking(client):
 
 def test_parameter_tampering_prevention(client):
     email = f"hacker_{uuid.uuid4().hex[:6]}@test.com"
+    client.get("/api/health")
     res = client.post(
         "/api/auth/register",
         json={
@@ -243,8 +244,9 @@ def test_parameter_tampering_prevention(client):
             "password": "StrongPassword123!",
             "role": "admin",
             "is_active": True,
-            "admin_code": "SENTINEL_ADMIN_SECRET_2026",
+            "admin_code": "obsolete-bootstrap-value",
         },
+        headers=csrf_headers(client),
     )
     assert res.status_code == 200
     assert res.json()["user"]["role"] == "user"
@@ -257,7 +259,7 @@ def test_sql_injection_defense(client):
         "' UNION SELECT null, null, null --",
         "'; DROP TABLE users; --",
     ]:
-        res = client.post("/api/auth/login", json={"email": payload, "password": "password"})
+        res = client.post("/api/auth/login", json={"email": payload, "password": "password"}, headers=csrf_headers(client))
         assert res.status_code in [400, 401, 422]
 
 
