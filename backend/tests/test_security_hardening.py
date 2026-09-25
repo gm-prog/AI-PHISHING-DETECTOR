@@ -279,6 +279,7 @@ def test_input_validation(client):
     assert client.post(
         "/api/auth/register",
         json={"email": "not-an-email", "password": "short"},
+        headers=csrf_headers(client),
     ).status_code in [400, 422]
 
 
