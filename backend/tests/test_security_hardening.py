@@ -75,11 +75,13 @@ def csrf_headers(client):
 
 
 def register(client, email, password):
-    return client.post("/api/auth/register", json={"email": email, "password": password})
+    client.get("/api/health")
+    return client.post("/api/auth/register", json={"email": email, "password": password}, headers=csrf_headers(client))
 
 
 def login(client, email, password):
-    return client.post("/api/auth/login", json={"email": email, "password": password})
+    client.get("/api/health")
+    return client.post("/api/auth/login", json={"email": email, "password": password}, headers=csrf_headers(client))
 
 
 def test_user_registration_and_login_uses_http_only_cookie(client):
