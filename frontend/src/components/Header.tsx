@@ -4,7 +4,6 @@ import { useAuth } from "../context/AuthContext";
 
 interface HeaderProps {
   onOpenSettings: () => void;
-  userApiKey: string;
   backendGeminiConfigured: boolean;
   setBackendGeminiConfigured: (val: boolean) => void;
   onAddToast: (msg: string, type: "success" | "error" | "info") => void;
@@ -12,7 +11,6 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   onOpenSettings,
-  userApiKey,
   backendGeminiConfigured,
   setBackendGeminiConfigured,
   onAddToast
@@ -42,7 +40,7 @@ export const Header: React.FC<HeaderProps> = ({
     return () => clearInterval(interval);
   }, []);
 
-  const hasApiKey = !!userApiKey || backendGeminiConfigured;
+  const hasApiKey = backendGeminiConfigured;
 
   const handleLogout = () => {
     logout();
