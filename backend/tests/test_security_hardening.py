@@ -328,9 +328,65 @@ def test_no_bearer_authorization_is_accepted(client):
     ).status_code == 401
 
 
-def test_anonymous_history_is_not_cross_session_private_data():
+def test_anonymous_history_is_isolated_by_guest_session():
     guest1 = TestClient(app)
     guest2 = TestClient(app)
-    # Anonymous history remains intentionally public until guest isolation is hardened in the next step.
+
     assert guest1.get("/api/history").status_code == 200
     assert guest2.get("/api/history").status_code == 200
+    assert guest1.get("/api/history").json() == []
+    assert guest2.get("/api/history").json() == []
+
+    scan = guest1.post(
+        "/api/analyze",
+        json={
+            "input_type": "url",
+            "content": "https://guest-one-private.example/login",
+        },
+        headers=csrf_headers(guest1),
+    )
+    assert scan.status_code == 200
+    assert guest1.cookies.get("sentinel_guest")
+    assert len(guest1.cookies.get("sentinel_guest")) >= 32
+
+    guest1_history = guest1.get("/api/history")
+    assert guest1_history.status_code == 200
+    assert len(guest1_history.json()) == 1
+    assert "guest-one-private" in guest1_history.json()[0]["content"]
+
+    guest2_history = guest2.get("/api/history")
+    assert guest2_history.status_code == 200
+    assert guest2_history.json() == []
+
+    db = TestingSessionLocal()
+    try:
+        record = db.query(ScanHistory).filter(ScanHistory.content.contains("guest-one-private")).one()
+        assert record.user_id is None
+        assert record.guest_session_hash
+        assert record.guest_session_hash != guest1.cookies.get("sentinel_guest")
+        assert record.guest_session_hash != guest2.cookies.get("sentinel_guest")
+    finally:
+        db.close()
+
+
+def test_anonymous_clear_history_only_clears_current_guest_session():
+    guest1 = TestClient(app)
+    guest2 = TestClient(app)
+
+    for client, value in [
+        (guest1, "https://guest-one-clear.example/login"),
+        (guest2, "https://guest-two-clear.example/login"),
+    ]:
+        assert client.post(
+            "/api/analyze",
+            json={"input_type": "url", "content": value},
+            headers=csrf_headers(client),
+        ).status_code == 200
+
+    assert len(guest1.get("/api/history").json()) == 1
+    assert len(guest2.get("/api/history").json()) == 1
+
+    cleared = guest1.delete("/api/history", headers=csrf_headers(guest1))
+    assert cleared.status_code == 200
+    assert guest1.get("/api/history").json() == []
+    assert len(guest2.get("/api/history").json()) == 1
