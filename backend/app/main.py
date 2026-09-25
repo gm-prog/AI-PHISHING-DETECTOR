@@ -83,14 +83,18 @@ logger.addFilter(SensitiveLogFilter())
 
 # Configure Rate Limiter (SlowAPI)
 def security_rate_limit_key(request: Request) -> str:
-    """Prefer the opaque server session as the bucket; fall back to source IP."""
+    """
+    Keep the abuse bucket stable across the anonymous -> guest-cookie transition.
+    Authenticated requests are isolated by their opaque server session plus source IP;
+    anonymous requests remain IP-scoped so a new guest cookie cannot reset the limit.
+    """
+    client_ip = get_remote_address(request)
     session = request.cookies.get(settings.AUTH_COOKIE_NAME)
     if session:
-        return "session:" + hashlib.sha256(session.encode("utf-8")).hexdigest()
-    guest = request.cookies.get(settings.GUEST_COOKIE_NAME)
-    if guest:
-        return "guest:" + hashlib.sha256(guest.encode("utf-8")).hexdigest()
-    return "ip:" + get_remote_address(request)
+        return "session:" + hashlib.sha256(
+            f"{client_ip}|{session}".encode("utf-8")
+        ).hexdigest()
+    return "ip:" + client_ip
 
 limiter = Limiter(key_func=security_rate_limit_key)
 
