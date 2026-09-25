@@ -23,7 +23,7 @@ export const Header: React.FC<HeaderProps> = ({
   const checkHealth = async () => {
     try {
       const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
-      const res = await fetch(`${API_BASE}/api/health`);
+      const res = await fetch(`${API_BASE}/api/health`, { credentials: "include" });
       if (res.ok) {
         const data = await res.json();
         setBackendStatus("connected");
