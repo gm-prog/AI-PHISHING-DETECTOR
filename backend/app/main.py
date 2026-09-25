@@ -205,10 +205,9 @@ async def register(request: Request, body: UserCreate, db: Session = Depends(get
             detail="An account with this email address already exists."
         )
 
-    # Check for admin setup code
+    # Public registration can only create standard users.
+    # Administrative roles must be provisioned through a trusted server-side process.
     role = "user"
-    if body.admin_code and body.admin_code.strip() == "SENTINEL_ADMIN_SECRET_2026":
-        role = "admin"
 
     user = User(
         id=str(uuid.uuid4()),
