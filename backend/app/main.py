@@ -185,9 +185,7 @@ def generate_local_explanation(
             report += f"\n#### {idx}. {sev_icon} [{sev}] {sig.get('title', 'Security Warning')}\n"
             report += f"> {sig.get('description', 'No details available.')}\n"
 
-    report += "\n---
-
-### Recommended Security Response\n"
+    report += "\n---\n\n### Recommended Security Response\n"
     if risk_score >= 70:
         report += """
 ⛔ **CRITICAL RISK — Confirmed Threat Indicators**
