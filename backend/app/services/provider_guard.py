@@ -48,3 +48,9 @@ urlhaus_cache = TTLCache(max_entries=512, ttl_seconds=600)
 llm_semaphore = asyncio.Semaphore(4)
 virustotal_semaphore = asyncio.Semaphore(4)
 urlhaus_semaphore = asyncio.Semaphore(8)
+
+
+async def run_bounded(awaitable, semaphore: asyncio.Semaphore, timeout_seconds: float):
+    """Run one provider operation with a concurrency cap and hard timeout."""
+    async with semaphore:
+        return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
