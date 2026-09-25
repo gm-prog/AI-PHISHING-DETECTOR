@@ -7,6 +7,8 @@ import json
 import logging
 import traceback
 
+from app.services.provider_guard import llm_cache, llm_semaphore, stable_key
+
 # Setup clean, readable logger formatting
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("phishing_detector.llm_service")
@@ -126,9 +128,27 @@ def analyze_with_llm(
     Falls back to heuristic reporting if the API call fails or key is missing.
     """
     if not api_key:
-        logger.info("Skipping LLM analysis: No API key provided.")
+        logger.info("Skipping LLM analysis: no server-side API key configured.")
         return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
+
+    cache_key = stable_key("llm", f"{input_type}|{content}|{heuristic_score}|{json.dumps(heuristic_signals, sort_keys=True)}")
+    cached = await llm_cache.get(cache_key)
+    if cached is not None:
+        return cached
         
+    try:
+        async with llm_semaphore:
+            return await _analyze_with_llm_unbounded(input_type, content, api_key, heuristic_score, heuristic_signals)
+    except Exception:
+        return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
+
+def _analyze_with_llm_unbounded(
+    input_type: str,
+    content: str,
+    api_key: Optional[str],
+    heuristic_score: int,
+    heuristic_signals: List[Dict[str, Any]]
+) -> Dict[str, Any]:
     try:
         # Initialize Google GenAI client
         client = genai.Client(api_key=api_key.strip())
@@ -219,12 +239,14 @@ Please analyze this input and provide the final risk score, status classificatio
         elif final_score >= 30:
             final_status = "warning"
             
-        return {
+        result = {
             "risk_score": final_score,
             "status": final_status,
             "phishing_signals": merged_signals,
             "ai_explanation": result_json.get("ai_explanation", "No explanation generated.")
         }
+        await llm_cache.set(cache_key, result)
+        return result
         
     except APIError as e:
         logger.error(f"[GEMINI API ERROR] Authentication/Rate limit fail code={e.code}: {e.message}")
