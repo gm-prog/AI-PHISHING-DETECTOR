@@ -31,7 +31,6 @@ from app.models.schemas import (
 from app.auth import (
     get_password_hash,
     verify_password,
-    create_access_token,
     get_current_user,
     get_optional_current_user,
     require_admin,
@@ -240,7 +239,7 @@ def health_check():
 @app.post("/api/auth/register", response_model=AuthResponse)
 @limiter.limit("10/minute")
 async def register(request: Request, response: Response, body: UserCreate, db: Session = Depends(get_db)):
-    """Registers a new user account with bcrypt password hashing."""
+    """Registers a new standard user and establishes an HttpOnly session."""
     existing_user = db.query(User).filter(User.email == body.email).first()
     if existing_user:
         raise HTTPException(
@@ -248,15 +247,11 @@ async def register(request: Request, response: Response, body: UserCreate, db: S
             detail="An account with this email address already exists."
         )
 
-    # Public registration can only create standard users.
-    # Administrative roles must be provisioned through a trusted server-side process.
-    role = "user"
-
     user = User(
         id=str(uuid.uuid4()),
         email=body.email,
         hashed_password=get_password_hash(body.password),
-        role=role,
+        role="user",
         is_active=True,
         created_at=datetime.now(timezone.utc).isoformat()
     )
@@ -264,12 +259,11 @@ async def register(request: Request, response: Response, body: UserCreate, db: S
     db.commit()
     db.refresh(user)
 
-    access_token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
-    logger.info(f"[AUTH] New user registered: {user.email} (role={user.role})")
+    session_token = create_user_session(user, db)
+    _set_auth_cookies(response, session_token)
+    logger.info("[AUTH] New user registered: email=%s role=user", user.email)
 
-    return TokenResponse(
-        access_token=access_token,
-        token_type="bearer",
+    return AuthResponse(
         user=UserOut(
             id=user.id,
             email=user.email,
@@ -283,7 +277,7 @@ async def register(request: Request, response: Response, body: UserCreate, db: S
 @app.post("/api/auth/login", response_model=AuthResponse)
 @limiter.limit("10/minute")
 async def login(request: Request, response: Response, body: UserLogin, db: Session = Depends(get_db)):
-    """Authenticates credentials and issues a signed JWT session token."""
+    """Authenticates credentials and establishes an HttpOnly session."""
     user = db.query(User).filter(User.email == body.email).first()
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(
@@ -299,11 +293,9 @@ async def login(request: Request, response: Response, body: UserLogin, db: Sessi
 
     session_token = create_user_session(user, db)
     _set_auth_cookies(response, session_token)
-    logger.info(f"[AUTH] User login successful: {user.email}")
+    logger.info("[AUTH] User login successful: email=%s", user.email)
 
     return AuthResponse(
-        access_token=access_token,
-        token_type="bearer",
         user=UserOut(
             id=user.id,
             email=user.email,
@@ -314,12 +306,13 @@ async def login(request: Request, response: Response, body: UserLogin, db: Sessi
     )
 
 
-\n@app.post("/api/auth/logout")
+@app.post("/api/auth/logout")
 def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     """Revokes the current server-side session and clears authentication cookies."""
     revoke_session(request.cookies.get(settings.AUTH_COOKIE_NAME), db)
     _clear_auth_cookies(response)
     return {"status": "success"}
+
 
 @app.get("/api/auth/me", response_model=UserOut)
 def get_current_user_profile(current_user: User = Depends(get_current_user)):
