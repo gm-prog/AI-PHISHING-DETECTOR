@@ -40,6 +40,32 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def isolate_external_threat_intel(monkeypatch):
+    async def fake_vt(url, api_key):
+        return {
+            "status": "skipped",
+            "url": url,
+            "malicious_count": 0,
+            "suspicious_count": 0,
+            "reputation_score": 100,
+            "vendors": [],
+        }
+
+    async def fake_urlhaus(url):
+        return {
+            "status": "success",
+            "url": url,
+            "in_database": False,
+            "threat_type": None,
+            "date_added": "",
+            "malware_families": [],
+        }
+
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", fake_vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", fake_urlhaus)
+
+
 def csrf_headers(client):
     token = client.cookies.get("sentinel_csrf")
     assert token, "CSRF cookie must be bootstrapped before unsafe requests"
