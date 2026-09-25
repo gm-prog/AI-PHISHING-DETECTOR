@@ -1,11 +1,12 @@
 import uuid
 import asyncio
+import secrets
 import re
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Depends, status, Request
+from fastapi import FastAPI, HTTPException, Depends, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -24,7 +25,7 @@ from app.models.schemas import (
     UserCreate,
     UserLogin,
     UserOut,
-    TokenResponse,
+    AuthResponse,
     AdminMetricsOut
 )
 from app.auth import (
@@ -33,7 +34,9 @@ from app.auth import (
     create_access_token,
     get_current_user,
     get_optional_current_user,
-    require_admin
+    require_admin,
+    create_user_session,
+    revoke_session
 )
 from app.services.url_service import analyze_url
 from app.services.email_service import analyze_email_text, analyze_email_headers
@@ -77,6 +80,46 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+\n\ndef _set_auth_cookies(response: Response, session_token: str) -> None:
+    csrf_token = secrets.token_urlsafe(32)
+    response.set_cookie(
+        key=settings.AUTH_COOKIE_NAME,
+        value=session_token,
+        httponly=True,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+    response.set_cookie(
+        key=settings.CSRF_COOKIE_NAME,
+        value=csrf_token,
+        httponly=False,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(settings.AUTH_COOKIE_NAME, path="/")
+    response.delete_cookie(settings.CSRF_COOKIE_NAME, path="/")
+
+def _validate_csrf(request: Request) -> None:
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    # Authentication endpoints do not yet have an authenticated cookie to protect.
+    if request.url.path in {"/api/auth/login", "/api/auth/register"}:
+        return
+    cookie_token = request.cookies.get(settings.CSRF_COOKIE_NAME)
+    header_token = request.headers.get("X-CSRF-Token")
+    if not cookie_token or not header_token or not secrets.compare_digest(cookie_token, header_token):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF validation failed.")
+
+@app.middleware("http")
+async def csrf_protection(request: Request, call_next):
+    _validate_csrf(request)
+    return await call_next(request)
 
 # Configure CORS
 allowed_origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
@@ -84,8 +127,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-CSRF-Token"],
 )
 
 # Security Headers Middleware
@@ -194,9 +237,9 @@ def health_check():
 
 
 # ================= AUTHENTICATION ENDPOINTS =================
-@app.post("/api/auth/register", response_model=TokenResponse)
+@app.post("/api/auth/register", response_model=AuthResponse)
 @limiter.limit("10/minute")
-async def register(request: Request, body: UserCreate, db: Session = Depends(get_db)):
+async def register(request: Request, response: Response, body: UserCreate, db: Session = Depends(get_db)):
     """Registers a new user account with bcrypt password hashing."""
     existing_user = db.query(User).filter(User.email == body.email).first()
     if existing_user:
@@ -237,9 +280,9 @@ async def register(request: Request, body: UserCreate, db: Session = Depends(get
     )
 
 
-@app.post("/api/auth/login", response_model=TokenResponse)
+@app.post("/api/auth/login", response_model=AuthResponse)
 @limiter.limit("10/minute")
-async def login(request: Request, body: UserLogin, db: Session = Depends(get_db)):
+async def login(request: Request, response: Response, body: UserLogin, db: Session = Depends(get_db)):
     """Authenticates credentials and issues a signed JWT session token."""
     user = db.query(User).filter(User.email == body.email).first()
     if not user or not verify_password(body.password, user.hashed_password):
@@ -254,10 +297,11 @@ async def login(request: Request, body: UserLogin, db: Session = Depends(get_db)
             detail="Account is inactive or suspended."
         )
 
-    access_token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
+    session_token = create_user_session(user, db)
+    _set_auth_cookies(response, session_token)
     logger.info(f"[AUTH] User login successful: {user.email}")
 
-    return TokenResponse(
+    return AuthResponse(
         access_token=access_token,
         token_type="bearer",
         user=UserOut(
@@ -269,6 +313,13 @@ async def login(request: Request, body: UserLogin, db: Session = Depends(get_db)
         )
     )
 
+
+\n@app.post("/api/auth/logout")
+def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    """Revokes the current server-side session and clears authentication cookies."""
+    revoke_session(request.cookies.get(settings.AUTH_COOKIE_NAME), db)
+    _clear_auth_cookies(response)
+    return {"status": "success"}
 
 @app.get("/api/auth/me", response_model=UserOut)
 def get_current_user_profile(current_user: User = Depends(get_current_user)):
