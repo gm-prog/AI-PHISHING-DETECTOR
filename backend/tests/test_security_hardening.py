@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.auth import get_password_hash
 from app.db import Base, get_db
-from app.main import app, SensitiveLogFilter
+from app.main import app, limiter, SensitiveLogFilter
 from app.models.domain import User, ScanHistory, UserSession
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test_security_db.db"
@@ -38,6 +38,13 @@ def setup_database():
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limits():
+    limiter.reset()
+    yield
+    limiter.reset()
 
 
 @pytest.fixture(autouse=True)
@@ -514,24 +521,18 @@ def test_request_body_size_guard_rejects_oversized_payload():
     assert res.status_code == 413
 
 
-def test_analysis_rate_limit_is_enforced_per_guest_bucket():
+def test_analysis_rate_limit_is_enforced_per_anonymous_ip_bucket():
     client = TestClient(app)
     client.get("/api/health")
     headers = csrf_headers(client)
 
-    successes = 0
-    limited = None
-    for i in range(12):
-        res = client.post(
+    responses = []
+    for i in range(11):
+        responses.append(client.post(
             "/api/analyze",
             json={"input_type": "url", "content": f"https://rate-limit-{i}.example/login"},
             headers=headers,
-        )
-        if res.status_code == 200:
-            successes += 1
-        elif res.status_code == 429:
-            limited = res
-            break
+        ))
 
-    assert successes == 10
-    assert limited is not None
+    assert [res.status_code for res in responses[:10]] == [200] * 10
+    assert responses[10].status_code == 429
