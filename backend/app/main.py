@@ -108,9 +108,6 @@ def _clear_auth_cookies(response: Response) -> None:
 def _validate_csrf(request: Request) -> None:
     if request.method in {"GET", "HEAD", "OPTIONS"}:
         return
-    # Authentication endpoints do not yet have an authenticated cookie to protect.
-    if request.url.path in {"/api/auth/login", "/api/auth/register"}:
-        return
     cookie_token = request.cookies.get(settings.CSRF_COOKIE_NAME)
     header_token = request.headers.get("X-CSRF-Token")
     if not cookie_token or not header_token or not secrets.compare_digest(cookie_token, header_token):
