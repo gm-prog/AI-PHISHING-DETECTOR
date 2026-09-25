@@ -21,7 +21,6 @@ from app.models.domain import User, ScanHistory
 from app.models.schemas import (
     AnalysisRequest,
     AnalysisResponse,
-    VerifyKeyRequest,
     UserCreate,
     UserLogin,
     UserOut,
@@ -39,7 +38,7 @@ from app.auth import (
 )
 from app.services.url_service import analyze_url
 from app.services.email_service import analyze_email_text, analyze_email_headers
-from app.services.llm_service import verify_gemini_key, analyze_with_llm
+from app.services.llm_service import analyze_with_llm
 from app.services.virustotal_service import analyze_url_with_virustotal
 from app.services.urlhaus_service import check_url_with_urlhaus
 
@@ -379,14 +378,6 @@ def get_all_scans_admin(
         "risk_score": r.risk_score,
         "status": r.status
     } for r in records]
-
-
-# ================= API KEY VERIFICATION =================
-@app.post("/api/verify-key")
-@limiter.limit("15/minute")
-async def verify_key(request: Request, body: VerifyKeyRequest):
-    """Verifies a custom Gemini API key (for settings modal)."""
-    return verify_gemini_key(body.api_key)
 
 
 # ================= CORE THREAT SCANNER ENDPOINT =================
