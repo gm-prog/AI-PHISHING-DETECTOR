@@ -79,7 +79,9 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-\n\ndef _set_auth_cookies(response: Response, session_token: str) -> None:
+
+
+def _set_auth_cookies(response: Response, session_token: str) -> None:
     csrf_token = secrets.token_urlsafe(32)
     response.set_cookie(
         key=settings.AUTH_COOKIE_NAME,
@@ -176,7 +178,9 @@ def generate_local_explanation(
             report += f"\n#### {idx}. {sev_icon} [{sev}] {sig.get('title', 'Security Warning')}\n"
             report += f"> {sig.get('description', 'No details available.')}\n"
 
-    report += "\n---\n\n### Recommended Security Response\n"
+    report += "\n---
+
+### Recommended Security Response\n"
     if risk_score >= 70:
         report += """
 ⛔ **CRITICAL RISK — Confirmed Threat Indicators**
