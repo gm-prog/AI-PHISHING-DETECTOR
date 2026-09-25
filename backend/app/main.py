@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -115,7 +116,14 @@ def _validate_csrf(request: Request) -> None:
 
 @app.middleware("http")
 async def csrf_protection(request: Request, call_next):
-    _validate_csrf(request)
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        cookie_token = request.cookies.get(settings.CSRF_COOKIE_NAME)
+        header_token = request.headers.get("X-CSRF-Token")
+        if not cookie_token or not header_token or not secrets.compare_digest(cookie_token, header_token):
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "CSRF validation failed."},
+            )
     response = await call_next(request)
     if not request.cookies.get(settings.CSRF_COOKIE_NAME):
         response.set_cookie(
