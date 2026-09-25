@@ -451,3 +451,46 @@ def test_production_api_docs_configuration_is_disabled():
     assert app.openapi_url is None
 
 
+
+
+@pytest.mark.asyncio
+async def test_provider_cache_is_bounded_and_expires():
+    from app.services.provider_guard import TTLCache
+
+    cache = TTLCache(max_entries=1, ttl_seconds=0.01)
+    await cache.set("first", {"ok": True})
+    assert await cache.get("first") == {"ok": True}
+    await cache.set("second", {"ok": True})
+    assert await cache.get("first") is None
+    assert await cache.get("second") == {"ok": True}
+    import asyncio
+    await asyncio.sleep(0.02)
+    assert await cache.get("second") is None
+
+
+def test_llm_input_is_bounded_before_provider_call(client, monkeypatch):
+    email = f"llm_bound_{uuid.uuid4().hex[:6]}@example.com"
+    assert register(client, email, "SecurePassword123!").status_code == 200
+
+    from app.config import settings
+    captured = {}
+
+    async def fake_llm(input_type, content, api_key, heuristic_score, heuristic_signals):
+        captured["length"] = len(content)
+        return {
+            "risk_score": heuristic_score,
+            "status": "safe",
+            "phishing_signals": heuristic_signals,
+            "ai_explanation": "test",
+        }
+
+    monkeypatch.setattr("app.main.analyze_with_llm", fake_llm)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-only-placeholder")
+    oversized = "https://example.com/" + ("A" * (settings.LLM_MAX_INPUT_CHARS + 100))
+    res = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": oversized},
+        headers=csrf_headers(client),
+    )
+    assert res.status_code == 200
+    assert captured["length"] == settings.LLM_MAX_INPUT_CHARS
