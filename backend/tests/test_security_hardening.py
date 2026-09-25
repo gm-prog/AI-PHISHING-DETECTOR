@@ -67,6 +67,8 @@ def isolate_external_threat_intel(monkeypatch):
 
 
 def csrf_headers(client):
+    if not client.cookies.get("sentinel_csrf"):
+        client.get("/api/health")
     token = client.cookies.get("sentinel_csrf")
     assert token, "CSRF cookie must be bootstrapped before unsafe requests"
     return {"X-CSRF-Token": token}
