@@ -9,8 +9,6 @@ export interface FullHistoryItem extends ScanHistoryItem {
 interface PhishingContextType {
   history: FullHistoryItem[];
   setHistory: (history: FullHistoryItem[]) => void;
-  apiKey: string;
-  setApiKey: (key: string) => void;
   isLoading: boolean;
   setIsLoading: (val: boolean) => void;
   error: string | null;
@@ -25,20 +23,16 @@ const PhishingContext = createContext<PhishingContextType | undefined>(undefined
 
 export function PhishingProvider({ children }: { children: ReactNode }) {
   const [history, setHistory] = useState<FullHistoryItem[]>([]);
-  const [apiKey, setApiKey] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [activeResponse, setActiveResponse] = useState<AnalysisResponse | null>(null);
   const [scanStepIndex, setScanStepIndex] = useState<number>(0);
-
 
   return (
     <PhishingContext.Provider
       value={{
         history,
         setHistory,
-        apiKey,
-        setApiKey,
         isLoading,
         setIsLoading,
         error,
