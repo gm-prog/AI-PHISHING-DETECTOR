@@ -29,6 +29,7 @@ from app.models.schemas import (
     AdminMetricsOut
 )
 from app.auth import (
+
     get_password_hash,
     verify_password,
     get_current_user,
@@ -79,6 +80,28 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+def _guest_session_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _get_or_create_guest_token(request: Request, response: Response) -> str:
+    existing = request.cookies.get(settings.GUEST_COOKIE_NAME)
+    if existing and len(existing) >= 32:
+        return existing
+
+    token = secrets.token_urlsafe(32)
+    response.set_cookie(
+        key=settings.GUEST_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+    return token
 
 
 def _set_auth_cookies(response: Response, session_token: str) -> None:
@@ -492,11 +515,16 @@ async def analyze_input(
 
     # 5. Persist to Database with User Scoping (RLS/Isolation)
     user_id = current_user.id if current_user else None
+    guest_session_hash = None
+    if current_user is None:
+        guest_token = _get_or_create_guest_token(request, response)
+        guest_session_hash = _guest_session_hash(guest_token)
     snippet = content[:100] + "..." if len(content) > 100 else content
 
     db_record = ScanHistory(
         id=str(uuid.uuid4()),
         user_id=user_id,
+        guest_session_hash=guest_session_hash,
         timestamp=datetime.now(timezone.utc).isoformat(),
         input_type=input_type,
         content=snippet,
@@ -537,19 +565,20 @@ async def analyze_input(
 # ================= SCOPED HISTORY & IDOR-PROTECTED ENDPOINTS =================
 @app.get("/api/history")
 def get_history(
+    request: Request,
     limit: int = 30,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_current_user)
 ):
-    """
-    Returns scan history scoped to the authenticated user.
-    If anonymous, returns public/guest scans.
-    """
+    """Returns history scoped to the authenticated user or this anonymous guest session."""
     query = db.query(ScanHistory)
     if current_user:
         query = query.filter(ScanHistory.user_id == current_user.id)
     else:
-        query = query.filter(ScanHistory.user_id == None)
+        guest_token = request.cookies.get(settings.GUEST_COOKIE_NAME)
+        if not guest_token:
+            return []
+        query = query.filter(ScanHistory.guest_session_hash == _guest_session_hash(guest_token))
 
     records = query.order_by(ScanHistory.timestamp.desc()).limit(min(limit, 50)).all()
     return [{
@@ -635,6 +664,8 @@ def delete_single_scan(
 
 @app.delete("/api/history")
 def clear_history(
+    request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_current_user)
 ):
@@ -642,7 +673,11 @@ def clear_history(
     if current_user:
         db.query(ScanHistory).filter(ScanHistory.user_id == current_user.id).delete()
     else:
-        db.query(ScanHistory).filter(ScanHistory.user_id == None).delete()
+        guest_token = request.cookies.get(settings.GUEST_COOKIE_NAME)
+        if guest_token:
+            db.query(ScanHistory).filter(
+                ScanHistory.guest_session_hash == _guest_session_hash(guest_token)
+            ).delete()
     db.commit()
     return {"status": "success", "message": "History cleared successfully."}
 
