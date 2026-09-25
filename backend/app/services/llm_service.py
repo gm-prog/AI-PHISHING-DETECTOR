@@ -5,7 +5,6 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 import json
 import logging
-import traceback
 
 from app.services.provider_guard import llm_cache, llm_semaphore, stable_key
 
@@ -43,34 +42,27 @@ Format the 'ai_explanation' field strictly in beautiful Markdown, including bull
 """
 
 def verify_gemini_key(api_key: str) -> Dict[str, Any]:
-    """
-    Validates a Gemini API key by making a lightweight query using Gemini 3.6 Flash via Interactions API.
-    Returns {"valid": True} or {"valid": False, "error": str} with descriptive error details.
-    """
+    """Validate a Gemini key without returning provider diagnostics or key material."""
     if not api_key or not api_key.strip():
-        return {"valid": False, "error": "API key is empty."}
-        
+        return {"valid": False, "error": "API key is not configured."}
+
     try:
         client = genai.Client(api_key=api_key.strip())
-        # Make a tiny lightweight call check using Interactions API with gemini-3.6-flash
         if hasattr(client, "interactions"):
             client.interactions.create(
-                model='models/gemini-3.6-flash',
-                input='Verify connection test.'
+                model="models/gemini-3.6-flash",
+                input="Verify connection test.",
             )
         else:
             client.models.generate_content(
-                model='models/gemini-3.6-flash',
-                contents='Verify connection test.'
+                model="models/gemini-3.6-flash",
+                contents="Verify connection test.",
             )
-        logger.info("[SECURE] Gemini API key verified successfully.")
+        logger.info("[SECURE] Gemini API key verification succeeded.")
         return {"valid": True}
-    except (APIError, Exception) as e:
-        error_str = str(e)
-        message = getattr(e, 'message', error_str)
-        error_msg = f"Gemini API authentication failed: {message}"
-        logger.error(f"[API ERROR] {error_msg}")
-        return {"valid": False, "error": message}
+    except Exception:
+        logger.warning("[SECURE] Gemini API key verification failed.")
+        return {"valid": False, "error": "Gemini API authentication failed."}
 
 def get_fallback_analysis(input_type: str, content: str, heuristic_score: int, heuristic_signals: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Provides a graceful fallback report when Gemini API is unavailable or unconfigured."""
