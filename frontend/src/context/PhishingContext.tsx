@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect } from "react";
+import { createContext, useContext, useState } from "react";
 import type { ReactNode } from "react";
 import type { AnalysisResponse, ScanHistoryItem } from "../types";
 
@@ -31,11 +31,6 @@ export function PhishingProvider({ children }: { children: ReactNode }) {
   const [activeResponse, setActiveResponse] = useState<AnalysisResponse | null>(null);
   const [scanStepIndex, setScanStepIndex] = useState<number>(0);
 
-  // Load API key from LocalStorage on mount
-  useEffect(() => {
-    const savedKey = localStorage.getItem("gemini_api_key") || "";
-    setApiKey(savedKey);
-  }, []);
 
   return (
     <PhishingContext.Provider
