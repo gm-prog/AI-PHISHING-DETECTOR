@@ -44,8 +44,9 @@ def analyze_email_text(text: str) -> Dict[str, Any]:
             if severity in ["medium", "high"]:
                 has_urgency_keywords = True
             base_risk += weight
+            signal_id = pattern.replace("\\b", "").replace("?", "").replace("*", "").replace("(", "").replace(")", "").replace("|", "_")[:15]
             signals.append({
-                "id": f"keyword_{pattern.replace(r'\b', '').replace('?', '').replace('*', '').replace('(', '').replace(')', '').replace('|', '_')[:15]}",
+                "id": f"keyword_{signal_id}",
                 "severity": severity,
                 "title": title,
                 "description": desc
