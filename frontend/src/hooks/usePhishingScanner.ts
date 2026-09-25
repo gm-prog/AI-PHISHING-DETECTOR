@@ -68,8 +68,7 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           input_type: type,
-          content: content,
-          api_key: apiKey || undefined
+          content: content
         })
       });
 
