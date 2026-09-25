@@ -9,6 +9,8 @@ import asyncio
 import logging
 from typing import Dict, Any
 
+from app.services.provider_guard import urlhaus_cache, urlhaus_semaphore, stable_key
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,8 +24,14 @@ async def check_url_with_urlhaus(url: str) -> Dict[str, Any]:
         Dict with keys: status, url, in_database, threat_type,
         date_added, malware_families, raw_response.
     """
+    cache_key = stable_key("urlhaus", url.strip())
+    cached = await urlhaus_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
-        async with aiohttp.ClientSession() as session:
+        async with urlhaus_semaphore:
+            async with aiohttp.ClientSession() as session:
             async with session.post(
                 "https://urlhaus-api.abuse.ch/v1/url/",
                 data={"url": url},
@@ -46,7 +54,7 @@ async def check_url_with_urlhaus(url: str) -> Dict[str, Any]:
                 query_status = result.get("query_status")
 
                 if query_status == "no_results":
-                    return {
+                    result_data = {
                         "status": "success",
                         "url": url,
                         "in_database": False,
