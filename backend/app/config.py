@@ -18,7 +18,9 @@ class Settings:
     )
 
     # JWT Authentication Security Settings
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "sentinel_ai_super_secret_hardening_key_2026_jwt_token_secure")
+    # There is intentionally no source-controlled fallback. The application must be
+    # configured with a deployment-specific signing key.
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440")) # 24 hours
 
@@ -28,3 +30,8 @@ class Settings:
 
 settings = Settings()
 
+if not settings.JWT_SECRET_KEY:
+    raise RuntimeError(
+        "JWT_SECRET_KEY must be configured in the environment; "
+        "refusing to start without an explicit signing key."
+    )
