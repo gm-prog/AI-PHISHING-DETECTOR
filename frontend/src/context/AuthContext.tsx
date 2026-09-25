@@ -6,7 +6,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000
 interface AuthContextType extends AuthState {
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   register: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  logout: () => void;
+  logout: () => Promise<void>;
   authFetch: (url: string, options?: RequestInit) => Promise<Response>;
   isAuthModalOpen: boolean;
   openAuthModal: () => void;
@@ -15,50 +15,59 @@ interface AuthContextType extends AuthState {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+function getCookie(name: string): string | null {
+  const prefix = `${name}=`;
+  const entry = document.cookie
+    .split("; ")
+    .find((cookie) => cookie.startsWith(prefix));
+  return entry ? decodeURIComponent(entry.slice(prefix.length)) : null;
+}
+
+function csrfHeaders(options: RequestInit): Headers {
+  const headers = new Headers(options.headers || {});
+  const method = (options.method || "GET").toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const csrf = getCookie("sentinel_csrf");
+    if (csrf) {
+      headers.set("X-CSRF-Token", csrf);
+    }
+  }
+  return headers;
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
 
-  // Load user profile on mount if token exists
   useEffect(() => {
     const fetchMe = async () => {
-      if (!token) {
-        setIsLoading(false);
-        return;
-      }
-
       try {
         const res = await fetch(`${API_BASE_URL}/api/auth/me`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          credentials: "include",
         });
 
         if (res.ok) {
-          const userData = await res.json();
-          setUser(userData);
+          setUser(await res.json());
         } else {
-          // Token expired or invalid
-          setToken(null);
           setUser(null);
         }
-      } catch (err) {
-        console.error("Failed to verify user session:", err);
+      } catch {
+        setUser(null);
       } finally {
         setIsLoading(false);
       }
     };
 
     fetchMe();
-  }, [token]);
+  }, []);
 
   const login = async (email: string, password: string) => {
     try {
       const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ email, password }),
       });
 
@@ -67,7 +76,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: data.detail || "Authentication failed" };
       }
 
-      setToken(data.access_token);
       setUser(data.user);
       setIsAuthModalOpen(false);
       return { success: true };
@@ -81,6 +89,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await fetch(`${API_BASE_URL}/api/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ email, password }),
       });
 
@@ -89,7 +98,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: data.detail || "Registration failed" };
       }
 
-      setToken(data.access_token);
       setUser(data.user);
       setIsAuthModalOpen(false);
       return { success: true };
@@ -98,24 +106,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const logout = () => {
-    setToken(null);
-    setUser(null);
+  const logout = async () => {
+    try {
+      await fetch(`${API_BASE_URL}/api/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ method: "POST" }),
+      });
+    } finally {
+      setUser(null);
+    }
   };
 
   const authFetch = async (url: string, options: RequestInit = {}) => {
-    const headers = new Headers(options.headers || {});
-    if (token) {
-      headers.set("Authorization", `Bearer ${token}`);
-    }
-    return fetch(url, { ...options, headers });
+    return fetch(url, {
+      ...options,
+      credentials: "include",
+      headers: csrfHeaders(options),
+    });
   };
 
   return (
     <AuthContext.Provider
       value={{
         user,
-        token,
         isAuthenticated: !!user,
         isLoading,
         login,
