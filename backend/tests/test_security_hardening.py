@@ -287,17 +287,17 @@ def test_no_bearer_authorization_is_accepted(client):
     pwd = "SecurePassword123!"
     assert register(client, email, pwd).status_code == 200
 
-    # The actual session is cookie-only; an arbitrary bearer token cannot authenticate.
-    assert client.get(
+    # A separate client without the session cookie cannot authenticate with a bearer header.
+    attacker = TestClient(app)
+    assert attacker.get(
         "/api/auth/me",
         headers={"Authorization": "Bearer arbitrary-token"},
-    ).status_code == 200
+    ).status_code == 401
 
 
 def test_anonymous_history_is_not_cross_session_private_data():
     guest1 = TestClient(app)
     guest2 = TestClient(app)
-    # Anonymous history is intentionally still public in the current model.
-    # This test documents the remaining design debt rather than claiming isolation.
+    # Anonymous history remains intentionally public until guest isolation is hardened in the next step.
     assert guest1.get("/api/history").status_code == 200
     assert guest2.get("/api/history").status_code == 200
