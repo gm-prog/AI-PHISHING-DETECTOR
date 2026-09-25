@@ -11,6 +11,10 @@ services:
         sync: false
       - key: PYTHON_VERSION
         value: "3.11"
+      - key: ENVIRONMENT
+        value: "production"
+      - key: ALLOWED_ORIGINS
+        sync: false
       - key: AUTH_COOKIE_SECURE
         value: "true"
       - key: AUTH_COOKIE_SAMESITE
