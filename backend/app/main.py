@@ -501,12 +501,13 @@ async def analyze_input(
 
     # 4. LLM Semantic Engine or Local Heuristic Explanation
     active_key = settings.GEMINI_API_KEY
+    llm_content = content[:settings.LLM_MAX_INPUT_CHARS]
     if active_key:
-        llm_cache_key = stable_key("llm", f"{input_type}|{content}|{heuristic_score}|{heuristic_signals}")
+        llm_cache_key = stable_key("llm", f"{input_type}|{llm_content}|{heuristic_score}|{heuristic_signals}")
         cached_llm = await llm_cache.get(llm_cache_key)
         llm_res = cached_llm or await analyze_with_llm(
             input_type=input_type,
-            content=content,
+            content=llm_content,
             api_key=active_key,
             heuristic_score=heuristic_score,
             heuristic_signals=heuristic_signals
