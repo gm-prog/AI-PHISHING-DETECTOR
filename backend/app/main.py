@@ -115,6 +115,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 MAX_REQUEST_BODY_BYTES = settings.MAX_REQUEST_BODY_BYTES
 
+class RequestEntityTooLargeError(Exception):
+    """Internal signal used to stop oversized streamed request bodies."""
+
 @app.middleware("http")
 async def request_size_guard(request: Request, call_next):
     content_length = request.headers.get("content-length")
@@ -130,7 +133,31 @@ async def request_size_guard(request: Request, call_next):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={"detail": "Invalid Content-Length header."},
             )
-    return await call_next(request)
+        return await call_next(request)
+
+    # Chunked/streamed requests have no Content-Length. Wrap receive() so the
+    # application can never consume more than the configured hard cap.
+    received = 0
+    original_receive = request._receive
+
+    async def limited_receive():
+        nonlocal received
+        message = await original_receive()
+        if message.get("type") == "http.request":
+            chunk = message.get("body", b"")
+            received += len(chunk)
+            if received > MAX_REQUEST_BODY_BYTES:
+                raise RequestEntityTooLargeError()
+        return message
+
+    request._receive = limited_receive
+    try:
+        return await call_next(request)
+    except RequestEntityTooLargeError:
+        return JSONResponse(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            content={"detail": "Request body exceeds the allowed size."},
+        )
 
 
 def _guest_session_hash(token: str) -> str:
