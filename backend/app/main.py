@@ -421,7 +421,7 @@ async def analyze_input(
             status_label = "safe"
 
     # 4. LLM Semantic Engine or Local Heuristic Explanation
-    active_key = body.api_key if body.api_key else settings.GEMINI_API_KEY
+    active_key = settings.GEMINI_API_KEY
     if active_key:
         llm_res = analyze_with_llm(
             input_type=input_type,
