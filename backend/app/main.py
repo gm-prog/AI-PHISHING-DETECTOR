@@ -404,6 +404,7 @@ def get_all_scans_admin(
 @limiter.limit("30/minute")
 async def analyze_input(
     request: Request,
+    response: Response,
     body: AnalysisRequest,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_current_user)
