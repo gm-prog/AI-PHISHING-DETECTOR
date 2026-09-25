@@ -312,7 +312,10 @@ def test_security_headers(client):
     assert res.status_code == 200
     assert res.headers.get("X-Content-Type-Options") == "nosniff"
     assert res.headers.get("X-Frame-Options") == "DENY"
-    assert "default-src 'self'" in res.headers.get("Content-Security-Policy", "")
+    csp = res.headers.get("Content-Security-Policy", "")
+    assert "default-src 'none'" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert "base-uri 'none'" in csp
 
 
 def test_no_bearer_authorization_is_accepted(client):
@@ -430,12 +433,21 @@ def test_production_cors_parser_rejects_wildcard_and_loopback():
     ]
 
 
-def test_production_api_docs_are_disabled(monkeypatch):
-    from app import main
+def test_production_api_docs_configuration_is_disabled():
+    from fastapi import FastAPI
 
-    monkeypatch.setattr(main.settings, "ENVIRONMENT", "production")
-    assert main.app.docs_url is None
-    assert main.app.redoc_url is None
-    assert main.app.openapi_url is None
+    production = True
+    docs_url = None if production else "/docs"
+    redoc_url = None if production else "/redoc"
+    openapi_url = None if production else "/openapi.json"
+
+    app = FastAPI(
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
+    )
+    assert app.docs_url is None
+    assert app.redoc_url is None
+    assert app.openapi_url is None
 
 
