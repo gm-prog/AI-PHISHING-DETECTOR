@@ -5,7 +5,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000
 
 interface AuthContextType extends AuthState {
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  register: (email: string, password: string, adminCode?: string) => Promise<{ success: boolean; error?: string }>;
+  register: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
   authFetch: (url: string, options?: RequestInit) => Promise<Response>;
   isAuthModalOpen: boolean;
@@ -17,7 +17,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem("sentinel_token"));
+  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
 
@@ -41,7 +41,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setUser(userData);
         } else {
           // Token expired or invalid
-          localStorage.removeItem("sentinel_token");
           setToken(null);
           setUser(null);
         }
@@ -68,7 +67,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: data.detail || "Authentication failed" };
       }
 
-      localStorage.setItem("sentinel_token", data.access_token);
       setToken(data.access_token);
       setUser(data.user);
       setIsAuthModalOpen(false);
@@ -78,16 +76,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const register = async (email: string, password: string, adminCode?: string) => {
+  const register = async (email: string, password: string) => {
     try {
       const res = await fetch(`${API_BASE_URL}/api/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          password,
-          admin_code: adminCode && adminCode.trim() ? adminCode.trim() : undefined,
-        }),
+        body: JSON.stringify({ email, password }),
       });
 
       const data = await res.json();
@@ -95,7 +89,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: data.detail || "Registration failed" };
       }
 
-      localStorage.setItem("sentinel_token", data.access_token);
       setToken(data.access_token);
       setUser(data.user);
       setIsAuthModalOpen(false);
@@ -106,7 +99,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = () => {
-    localStorage.removeItem("sentinel_token");
     setToken(null);
     setUser(null);
   };
