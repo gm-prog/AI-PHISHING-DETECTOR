@@ -83,9 +83,6 @@ class AnalysisResponse(BaseModel):
     urlhaus_threat_type: Optional[str] = Field(None)
     urlhaus_in_database: Optional[bool] = Field(None)
 
-class VerifyKeyRequest(BaseModel):
-    api_key: str = Field(..., min_length=1, max_length=256)
-
 class ScanHistoryItem(BaseModel):
     id: str
     user_id: Optional[str] = None
