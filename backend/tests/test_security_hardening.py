@@ -390,3 +390,52 @@ def test_anonymous_clear_history_only_clears_current_guest_session():
     assert cleared.status_code == 200
     assert guest1.get("/api/history").json() == []
     assert len(guest2.get("/api/history").json()) == 1
+
+
+def test_cors_rejects_unconfigured_origin(client):
+    res = client.options(
+        "/api/auth/me",
+        headers={
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert res.headers.get("access-control-allow-origin") is None
+
+
+def test_cors_allows_explicit_configured_origin(client):
+    origin = "http://localhost:5173"
+    res = client.options(
+        "/api/auth/me",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert res.headers.get("access-control-allow-origin") == origin
+    assert res.headers.get("access-control-allow-credentials") == "true"
+
+
+def test_production_cors_parser_rejects_wildcard_and_loopback():
+    from app.config import parse_allowed_origins
+
+    with pytest.raises(RuntimeError):
+        parse_allowed_origins("*", production=True)
+
+    with pytest.raises(RuntimeError):
+        parse_allowed_origins("http://localhost:5173", production=True)
+
+    assert parse_allowed_origins("https://app.example.com", production=True) == [
+        "https://app.example.com"
+    ]
+
+
+def test_production_api_docs_are_disabled(monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main.settings, "ENVIRONMENT", "production")
+    assert main.app.docs_url is None
+    assert main.app.redoc_url is None
+    assert main.app.openapi_url is None
+
+
