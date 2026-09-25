@@ -7,8 +7,6 @@ import asyncio
 import logging
 from typing import Dict, Any
 
-from app.services.provider_guard import virustotal_cache, virustotal_semaphore, stable_key
-
 logger = logging.getLogger(__name__)
 
 
@@ -35,11 +33,6 @@ async def analyze_url_with_virustotal(url: str, api_key: str) -> Dict[str, Any]:
             "vendors": [],
         }
 
-    cache_key = stable_key("virustotal", url.strip())
-    cached = await virustotal_cache.get(cache_key)
-    if cached is not None:
-        return cached
-
     try:
         import aiohttp
     except ImportError:
@@ -47,8 +40,7 @@ async def analyze_url_with_virustotal(url: str, api_key: str) -> Dict[str, Any]:
         return {"status": "error", "url": url, "error": "aiohttp not installed"}
 
     try:
-        async with virustotal_semaphore:
-            async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession() as session:
             headers = {"x-apikey": api_key.strip()}
             form = aiohttp.FormData()
             form.add_field("url", url)
