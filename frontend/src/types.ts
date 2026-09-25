@@ -8,20 +8,8 @@ export interface User {
 
 export interface AuthState {
   user: User | null;
-  token: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-}
-
-export interface EngineHealth {
-  status: string;
-  api_active: boolean;
-  engine_mode: string;
-  gemini_configured: boolean;
-  virustotal_configured: boolean;
-  urlhaus_configured: boolean;
-  version: string;
-  message: string;
 }
 
 export interface PhishingSignal {
@@ -34,7 +22,6 @@ export interface PhishingSignal {
 export interface AnalysisRequest {
   input_type: "url" | "email_text" | "email_header";
   content: string;
-  api_key?: string;
 }
 
 export interface VirusTotalData {
@@ -84,12 +71,10 @@ export interface AnalysisResponse {
     error?: string;
     [key: string]: any;
   };
-  // VirusTotal fields
   virustotal_findings?: VirusTotalData;
   vt_status?: string;
   vt_malicious_vendors?: number;
   vt_reputation?: number;
-  // URLhaus fields
   urlhaus_findings?: URLhausData;
   urlhaus_status?: string;
   urlhaus_threat_type?: string;
