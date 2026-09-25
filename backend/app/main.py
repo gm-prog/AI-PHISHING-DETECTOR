@@ -106,14 +106,6 @@ def _clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(settings.AUTH_COOKIE_NAME, path="/")
     response.delete_cookie(settings.CSRF_COOKIE_NAME, path="/")
 
-def _validate_csrf(request: Request) -> None:
-    if request.method in {"GET", "HEAD", "OPTIONS"}:
-        return
-    cookie_token = request.cookies.get(settings.CSRF_COOKIE_NAME)
-    header_token = request.headers.get("X-CSRF-Token")
-    if not cookie_token or not header_token or not secrets.compare_digest(cookie_token, header_token):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF validation failed.")
-
 @app.middleware("http")
 async def csrf_protection(request: Request, call_next):
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
