@@ -23,6 +23,11 @@ function getCookie(name: string): string | null {
   return entry ? decodeURIComponent(entry.slice(prefix.length)) : null;
 }
 
+async function ensureCsrfCookie(): Promise<void> {
+  if (getCookie("sentinel_csrf")) return;
+  await fetch(`${API_BASE_URL}/api/health`, { credentials: "include" });
+}
+
 function csrfHeaders(options: RequestInit): Headers {
   const headers = new Headers(options.headers || {});
   const method = (options.method || "GET").toUpperCase();
@@ -64,9 +69,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (email: string, password: string) => {
     try {
+      await ensureCsrfCookie();
       const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...csrfHeaders({ method: "POST" }) },
         credentials: "include",
         body: JSON.stringify({ email, password }),
       });
@@ -86,6 +92,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const register = async (email: string, password: string) => {
     try {
+      await ensureCsrfCookie();
       const res = await fetch(`${API_BASE_URL}/api/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
