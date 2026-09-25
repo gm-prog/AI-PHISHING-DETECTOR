@@ -500,3 +500,38 @@ def test_llm_input_is_bounded_before_provider_call(client, monkeypatch):
     )
     assert res.status_code == 200
     assert captured["length"] == settings.LLM_MAX_INPUT_CHARS
+
+
+def test_request_body_size_guard_rejects_oversized_payload():
+    client = TestClient(app)
+    client.get("/api/health")
+    oversized = "A" * 70000
+    res = client.post(
+        "/api/analyze",
+        json={"input_type": "email_text", "content": oversized},
+        headers=csrf_headers(client),
+    )
+    assert res.status_code == 413
+
+
+def test_analysis_rate_limit_is_enforced_per_guest_bucket():
+    client = TestClient(app)
+    client.get("/api/health")
+    headers = csrf_headers(client)
+
+    successes = 0
+    limited = None
+    for i in range(12):
+        res = client.post(
+            "/api/analyze",
+            json={"input_type": "url", "content": f"https://rate-limit-{i}.example/login"},
+            headers=headers,
+        )
+        if res.status_code == 200:
+            successes += 1
+        elif res.status_code == 429:
+            limited = res
+            break
+
+    assert successes == 10
+    assert limited is not None
