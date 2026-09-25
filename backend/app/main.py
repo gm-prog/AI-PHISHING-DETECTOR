@@ -17,7 +17,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from app.config import settings
+from app.config import settings, parse_allowed_origins
 from app.db import engine, Base, get_db
 from app.models.domain import User, ScanHistory
 from app.models.schemas import (
@@ -77,7 +77,10 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(
     title="SENTINEL AI — Threat Intelligence API",
     description="Hardened defense-in-depth phishing detection and threat analysis platform.",
-    version="2.0.0"
+    version="2.0.0",
+    docs_url=None if settings.ENVIRONMENT == "production" else "/docs",
+    redoc_url=None if settings.ENVIRONMENT == "production" else "/redoc",
+    openapi_url=None if settings.ENVIRONMENT == "production" else "/openapi.json",
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -154,7 +157,7 @@ async def csrf_protection(request: Request, call_next):
     return response
 
 # Configure CORS
-allowed_origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
+allowed_origins = parse_allowed_origins(settings.ALLOWED_ORIGINS, production=settings.ENVIRONMENT == "production")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -169,9 +172,11 @@ async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    if settings.ENVIRONMENT == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
