@@ -96,7 +96,7 @@ def security_rate_limit_key(request: Request) -> str:
         ).hexdigest()
     return "ip:" + client_ip
 
-limiter = Limiter(key_func=security_rate_limit_key)
+limiter = Limiter(\n    key_func=security_rate_limit_key,\n    storage_uri=settings.RATE_LIMIT_STORAGE_URI,\n    strategy="fixed-window",\n)
 
 app = FastAPI(
     title="SENTINEL AI — Threat Intelligence API",
