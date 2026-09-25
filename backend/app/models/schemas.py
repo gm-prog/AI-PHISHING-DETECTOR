@@ -23,7 +23,7 @@ class UserCreate(BaseModel):
         return v
 
 class UserLogin(BaseModel):
-    email: str = Field(..., description="User email", min_length=5, max_length=254)
+    email: str = Field(..., min_length=5, max_length=254, description="User email")
     password: str = Field(..., min_length=1, max_length=128, description="Account password")
 
     @field_validator("email")
@@ -38,9 +38,7 @@ class UserOut(BaseModel):
     is_active: bool
     created_at: str
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+class AuthResponse(BaseModel):
     user: UserOut
 
 # ================= SCAN & ANALYSIS SCHEMAS =================
@@ -49,7 +47,8 @@ class AnalysisRequest(BaseModel):
         ..., description="Type of input: 'url', 'email_text', or 'email_header'"
     )
     content: str = Field(
-        ..., min_length=1, max_length=50000, description="The content to analyze (URL string, email body, or raw email headers)"
+        ..., min_length=1, max_length=50000,
+        description="The content to analyze (URL string, email body, or raw email headers)"
     )
 
     @field_validator("content")
@@ -70,24 +69,22 @@ class AnalysisResponse(BaseModel):
     input_type: str = Field(..., description="Echoed input type")
     risk_score: int = Field(..., ge=0, le=100, description="Overall risk rating from 0 (Safe) to 100 (Critical Danger)")
     status: str = Field(..., description="Status classification: 'safe', 'warning', or 'danger'")
-    phishing_signals: List[PhishingSignal] = Field(default=[], description="List of suspicious features or indicators identified")
-    ai_explanation: str = Field(..., description="Detailed narrative breakdown summarizing why this is or isn't phishing")
-    details: Dict[str, Any] = Field(default={}, description="Technical metadata (domain info, headers parsed, etc.)")
+    phishing_signals: List[PhishingSignal] = Field(default=[], description="List of suspicious features or signals")
+    ai_explanation: str = Field(..., description="Detailed narrative breakdown")
+    details: Dict[str, Any] = Field(default={}, description="Technical metadata")
 
-    # VirusTotal Integration Fields
-    virustotal_findings: Optional[Dict[str, Any]] = Field(None, description="Raw VirusTotal scan results")
-    vt_status: Optional[str] = Field(None, description="VT call status: 'success', 'rate_limited', 'timeout', 'error', 'skipped'")
-    vt_malicious_vendors: Optional[int] = Field(None, description="Number of VT vendors that flagged this URL as malicious")
-    vt_reputation: Optional[int] = Field(None, description="VT reputation score 0-100 (100 = clean)")
+    virustotal_findings: Optional[Dict[str, Any]] = Field(None)
+    vt_status: Optional[str] = Field(None)
+    vt_malicious_vendors: Optional[int] = Field(None)
+    vt_reputation: Optional[int] = Field(None)
 
-    # URLhaus Integration Fields
-    urlhaus_findings: Optional[Dict[str, Any]] = Field(None, description="Raw URLhaus lookup results")
-    urlhaus_status: Optional[str] = Field(None, description="URLhaus lookup status: 'success', 'timeout', 'error'")
-    urlhaus_threat_type: Optional[str] = Field(None, description="URLhaus threat type (e.g. malware, phishing)")
-    urlhaus_in_database: Optional[bool] = Field(None, description="Whether URL is listed in URLhaus malware/phishing database")
+    urlhaus_findings: Optional[Dict[str, Any]] = Field(None)
+    urlhaus_status: Optional[str] = Field(None)
+    urlhaus_threat_type: Optional[str] = Field(None)
+    urlhaus_in_database: Optional[bool] = Field(None)
 
 class VerifyKeyRequest(BaseModel):
-    api_key: str = Field(..., min_length=1, max_length=256, description="The Gemini API key to verify")
+    api_key: str = Field(..., min_length=1, max_length=256)
 
 class ScanHistoryItem(BaseModel):
     id: str
