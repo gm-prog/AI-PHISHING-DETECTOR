@@ -441,6 +441,36 @@ def test_production_cors_parser_rejects_wildcard_and_loopback():
     ]
 
 
+def test_production_rate_limit_storage_requires_shared_backend():
+    import os
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env["ENVIRONMENT"] = "production"
+    env["ALLOWED_ORIGINS"] = "https://app.example.com"
+    env.pop("RATE_LIMIT_STORAGE_URI", None)
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.config"],
+        cwd=os.path.dirname(os.path.dirname(__file__)),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "RATE_LIMIT_STORAGE_URI must use Redis in production." in (result.stderr + result.stdout)
+
+    env["RATE_LIMIT_STORAGE_URI"] = "rediss://redis.example.com:6379/0"
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.config"],
+        cwd=os.path.dirname(os.path.dirname(__file__)),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+
+
 def test_production_api_docs_configuration_is_disabled():
     from fastapi import FastAPI
 
