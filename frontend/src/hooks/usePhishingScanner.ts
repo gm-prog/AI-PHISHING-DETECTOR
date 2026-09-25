@@ -18,7 +18,6 @@ export const SCANNING_STEPS: ScanStep[] = [
 export function usePhishingScanner(addToast: (msg: string, type: "success" | "error" | "info") => void) {
   const {
     history, setHistory,
-    apiKey,
     setIsLoading,
     setError,
     setActiveResponse,
