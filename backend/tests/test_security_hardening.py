@@ -310,8 +310,9 @@ def test_health_check_clarity(client):
     res = client.get("/api/health")
     assert res.status_code == 200
     data = res.json()
-    assert "engine_mode" in data
     assert data["api_active"] is True
+    assert "gemini_configured" not in data
+    assert "virustotal_configured" not in data
 
 
 def test_security_headers(client):
@@ -481,8 +482,6 @@ def test_provider_cache_is_bounded_and_expires():
 def test_llm_input_is_bounded_before_provider_call(client, monkeypatch):
     email = f"llm_bound_{uuid.uuid4().hex[:6]}@example.com"
     response = register(client, email, "SecurePassword123!")
-    if response.status_code == 429:
-        pytest.skip("shared test-client rate limit exhausted by earlier tests")
     assert response.status_code == 200
 
     from app.config import settings
