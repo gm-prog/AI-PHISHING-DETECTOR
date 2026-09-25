@@ -33,26 +33,29 @@ export const LlmReport: React.FC<LlmReportProps> = ({ explanation, onAddToast })
   const handlePrint = () => {
     const printWindow = window.open("", "_blank");
     if (printWindow) {
-      printWindow.document.write(`
-        <html>
-          <head>
-            <title>SENTINEL AI — Threat Intelligence Briefing</title>
-            <style>
-              body { font-family: 'Plus Jakarta Sans', sans-serif; padding: 30px; line-height: 1.6; color: #0f172a; background: #ffffff; }
-              h2, h3, h4 { color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 6px; }
-              table { border-collapse: collapse; width: 100%; margin: 15px 0; }
-              th, td { border: 1px solid #94a3b8; padding: 8px 12px; text-align: left; }
-              th { background: #e2e8f0; }
-              blockquote { border-left: 4px solid #00f0ff; margin: 12px 0; padding: 6px 16px; background: #f8fafc; }
-            </style>
-          </head>
-          <body>
-            <h1>SENTINEL AI — THREAT BRIEFING</h1>
-            <pre style="white-space: pre-wrap; font-family: inherit;">${explanation}</pre>
-          </body>
-        </html>
-      `);
-      printWindow.document.close();
+      const doc = printWindow.document;
+      doc.title = "SENTINEL AI — Threat Intelligence Briefing";
+
+      const style = doc.createElement("style");
+      style.textContent = `
+        body { font-family: 'Plus Jakarta Sans', sans-serif; padding: 30px; line-height: 1.6; color: #0f172a; background: #ffffff; }
+        h2, h3, h4 { color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 6px; }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; }
+        th, td { border: 1px solid #94a3b8; padding: 8px 12px; text-align: left; }
+        th { background: #e2e8f0; }
+        blockquote { border-left: 4px solid #00f0ff; margin: 12px 0; padding: 6px 16px; background: #f8fafc; }
+      `;
+      doc.head.appendChild(style);
+
+      const heading = doc.createElement("h1");
+      heading.textContent = "SENTINEL AI — THREAT BRIEFING";
+      doc.body.appendChild(heading);
+
+      const report = doc.createElement("pre");
+      report.style.whiteSpace = "pre-wrap";
+      report.style.fontFamily = "inherit";
+      report.textContent = explanation;
+      doc.body.appendChild(report);
       printWindow.print();
     }
   };
