@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, EmailStr, field_validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Optional, Any, Literal
 import re
 
@@ -6,7 +6,6 @@ import re
 class UserCreate(BaseModel):
     email: str = Field(..., description="Valid user email address", min_length=5, max_length=254)
     password: str = Field(..., min_length=8, max_length=128, description="Strong password (at least 8 characters)")
-    admin_code: Optional[str] = Field(None, description="Optional administrative setup passkey")
 
     @field_validator("email")
     @classmethod
@@ -86,7 +85,7 @@ class AnalysisResponse(BaseModel):
 
     # URLhaus Integration Fields
     urlhaus_findings: Optional[Dict[str, Any]] = Field(None, description="Raw URLhaus lookup results")
-    urlhaus_status: Optional[str] = Field(None, description="URLhaus call status: 'success', 'timeout', 'error'")
+    urlhaus_status: Optional[str] = Field(None, description="URLhaus lookup status: 'success', 'timeout', 'error'")
     urlhaus_threat_type: Optional[str] = Field(None, description="URLhaus threat type (e.g. malware, phishing)")
     urlhaus_in_database: Optional[bool] = Field(None, description="Whether URL is listed in URLhaus malware/phishing database")
 
@@ -109,5 +108,3 @@ class AdminMetricsOut(BaseModel):
     high_risk_scans: int
     clean_scans: int
     threat_signals_flagged: int
-
-
