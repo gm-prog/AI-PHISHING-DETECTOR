@@ -1,4 +1,5 @@
 name: Security and Quality Gate
+# Security validation trigger
 
 on:
   push:
