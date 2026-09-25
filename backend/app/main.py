@@ -120,7 +120,18 @@ def _validate_csrf(request: Request) -> None:
 @app.middleware("http")
 async def csrf_protection(request: Request, call_next):
     _validate_csrf(request)
-    return await call_next(request)
+    response = await call_next(request)
+    if not request.cookies.get(settings.CSRF_COOKIE_NAME):
+        response.set_cookie(
+            key=settings.CSRF_COOKIE_NAME,
+            value=secrets.token_urlsafe(32),
+            httponly=False,
+            secure=settings.AUTH_COOKIE_SECURE,
+            samesite=settings.AUTH_COOKIE_SAMESITE,
+            max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            path="/",
+        )
+    return response
 
 # Configure CORS
 allowed_origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
