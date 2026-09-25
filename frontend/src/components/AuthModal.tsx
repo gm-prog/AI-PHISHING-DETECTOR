@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Shield, Lock, Mail, Key, UserPlus, LogIn, X, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Shield, Lock, Mail, UserPlus, LogIn, X, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 
 interface AuthModalProps {
@@ -12,16 +12,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onAddToast }) => {
   const [tab, setTab] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [adminCode, setAdminCode] = useState("");
-  const [showAdminCode, setShowAdminCode] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
   const resetForm = () => {
     setEmail("");
     setPassword("");
-    setAdminCode("");
-    setShowAdminCode(false);
     setErrorMsg("");
   };
 
@@ -65,7 +61,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onAddToast }) => {
           setErrorMsg(res.error || "Authentication credentials rejected.");
         }
       } else {
-        const res = await register(email, password, adminCode);
+        const res = await register(email, password);
         if (res.success) {
           onAddToast("Security account established successfully.", "success");
           resetForm();
@@ -204,31 +200,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onAddToast }) => {
                   />
                 </div>
               </div>
-
-              {tab === "register" && (
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => setShowAdminCode(!showAdminCode)}
-                    className="text-[11px] text-[#00F0FF] hover:underline font-mono flex items-center gap-1.5 transition mt-1 cursor-pointer"
-                  >
-                    <Key className="w-3 h-3" />
-                    {showAdminCode ? "Hide Admin Authorization Code" : "Have an Admin Authorization Code?"}
-                  </button>
-
-                  {showAdminCode && (
-                    <div className="mt-2">
-                      <input
-                        type="text"
-                        placeholder="SENTINEL_ADMIN_SECRET_2026"
-                        value={adminCode}
-                        onChange={(e) => setAdminCode(e.target.value)}
-                        className="w-full px-3 py-1.5 rounded tactical-input text-xs font-mono border-[#FFB800]/40"
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
 
               <button
                 type="submit"
