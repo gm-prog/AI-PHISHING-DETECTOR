@@ -44,6 +44,16 @@ from app.services.email_service import analyze_email_text, analyze_email_headers
 from app.services.llm_service import analyze_with_llm
 from app.services.virustotal_service import analyze_url_with_virustotal
 from app.services.urlhaus_service import check_url_with_urlhaus
+from app.services.provider_guard import (
+    llm_cache,
+    virustotal_cache,
+    urlhaus_cache,
+    llm_semaphore,
+    virustotal_semaphore,
+    urlhaus_semaphore,
+    stable_key,
+    run_bounded,
+)
 
 from datetime import datetime, timezone
 
@@ -459,10 +469,7 @@ async def analyze_input(
     if input_type == "url":
         # VirusTotal Integration
         try:
-            vt_data = await asyncio.wait_for(
-                analyze_url_with_virustotal(content, settings.VIRUSTOTAL_API_KEY),
-                timeout=6.0
-            )
+            vt_data = await run_bounded(analyze_url_with_virustotal(content, settings.VIRUSTOTAL_API_KEY), virustotal_semaphore, 6.0)
             vt_status = vt_data.get("status")
             if vt_status == "success" and vt_data.get("malicious_count", 0) > 0:
                 boost = min(30, vt_data["malicious_count"] * 5)
@@ -474,10 +481,7 @@ async def analyze_input(
 
         # URLhaus Integration
         try:
-            uh_data = await asyncio.wait_for(
-                check_url_with_urlhaus(content),
-                timeout=5.0
-            )
+            uh_data = await run_bounded(check_url_with_urlhaus(content), urlhaus_semaphore, 5.0)
             uh_status = uh_data.get("status")
             if uh_status == "success" and uh_data.get("in_database"):
                 boost = 25
@@ -498,13 +502,17 @@ async def analyze_input(
     # 4. LLM Semantic Engine or Local Heuristic Explanation
     active_key = settings.GEMINI_API_KEY
     if active_key:
-        llm_res = analyze_with_llm(
+        llm_cache_key = stable_key("llm", f"{input_type}|{content}|{heuristic_score}|{heuristic_signals}")
+        cached_llm = await llm_cache.get(llm_cache_key)
+        llm_res = cached_llm or await analyze_with_llm(
             input_type=input_type,
             content=content,
             api_key=active_key,
             heuristic_score=heuristic_score,
             heuristic_signals=heuristic_signals
         )
+        if cached_llm is None:
+            await llm_cache.set(llm_cache_key, llm_res)
         final_score = llm_res["risk_score"]
         final_status = llm_res["status"]
         final_signals = llm_res["phishing_signals"]
