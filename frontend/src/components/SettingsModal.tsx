@@ -78,7 +78,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const handleSave = () => {
-    localStorage.setItem("gemini_api_key", apiKey.trim());
     onSave(apiKey.trim());
     onAddToast("Gateway settings updated.", "success");
     onClose();
@@ -86,7 +85,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleClear = () => {
     setApiKey("");
-    localStorage.removeItem("gemini_api_key");
     onSave("");
     onAddToast("Gemini API key cleared.", "info");
     setVerifyResult({ status: "idle", message: "" });
