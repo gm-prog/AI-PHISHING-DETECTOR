@@ -51,9 +51,6 @@ class AnalysisRequest(BaseModel):
     content: str = Field(
         ..., min_length=1, max_length=50000, description="The content to analyze (URL string, email body, or raw email headers)"
     )
-    api_key: Optional[str] = Field(
-        None, max_length=256, description="Optional custom Gemini API key supplied by the frontend"
-    )
 
     @field_validator("content")
     @classmethod
