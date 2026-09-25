@@ -82,7 +82,17 @@ logger = logging.getLogger("sentinel.api")
 logger.addFilter(SensitiveLogFilter())
 
 # Configure Rate Limiter (SlowAPI)
-limiter = Limiter(key_func=get_remote_address)
+def security_rate_limit_key(request: Request) -> str:
+    """Prefer the opaque server session as the bucket; fall back to source IP."""
+    session = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if session:
+        return "session:" + hashlib.sha256(session.encode("utf-8")).hexdigest()
+    guest = request.cookies.get(settings.GUEST_COOKIE_NAME)
+    if guest:
+        return "guest:" + hashlib.sha256(guest.encode("utf-8")).hexdigest()
+    return "ip:" + get_remote_address(request)
+
+limiter = Limiter(key_func=security_rate_limit_key)
 
 app = FastAPI(
     title="SENTINEL AI — Threat Intelligence API",
@@ -94,6 +104,25 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+MAX_REQUEST_BODY_BYTES = settings.MAX_REQUEST_BODY_BYTES
+
+@app.middleware("http")
+async def request_size_guard(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                return JSONResponse(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    content={"detail": "Request body exceeds the allowed size."},
+                )
+        except ValueError:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": "Invalid Content-Length header."},
+            )
+    return await call_next(request)
 
 
 def _guest_session_hash(token: str) -> str:
@@ -285,7 +314,7 @@ def health_check():
 
 # ================= AUTHENTICATION ENDPOINTS =================
 @app.post("/api/auth/register", response_model=AuthResponse)
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
 async def register(request: Request, response: Response, body: UserCreate, db: Session = Depends(get_db)):
     """Registers a new standard user and establishes an HttpOnly session."""
     existing_user = db.query(User).filter(User.email == body.email).first()
@@ -323,7 +352,7 @@ async def register(request: Request, response: Response, body: UserCreate, db: S
 
 
 @app.post("/api/auth/login", response_model=AuthResponse)
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
 async def login(request: Request, response: Response, body: UserLogin, db: Session = Depends(get_db)):
     """Authenticates credentials and establishes an HttpOnly session."""
     user = db.query(User).filter(User.email == body.email).first()
@@ -416,7 +445,7 @@ def get_all_scans_admin(
 
 # ================= CORE THREAT SCANNER ENDPOINT =================
 @app.post("/api/analyze", response_model=AnalysisResponse)
-@limiter.limit("30/minute")
+@limiter.limit("10/minute")
 async def analyze_input(
     request: Request,
     response: Response,
