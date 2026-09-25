@@ -469,7 +469,11 @@ async def analyze_input(
     if input_type == "url":
         # VirusTotal Integration
         try:
-            vt_data = await run_bounded(analyze_url_with_virustotal(content, settings.VIRUSTOTAL_API_KEY), virustotal_semaphore, 6.0)
+            vt_cache_key = stable_key("virustotal", content.strip())
+            vt_data = await virustotal_cache.get(vt_cache_key)
+            if vt_data is None:
+                vt_data = await run_bounded(analyze_url_with_virustotal(content, settings.VIRUSTOTAL_API_KEY), virustotal_semaphore, 6.0)
+                await virustotal_cache.set(vt_cache_key, vt_data)
             vt_status = vt_data.get("status")
             if vt_status == "success" and vt_data.get("malicious_count", 0) > 0:
                 boost = min(30, vt_data["malicious_count"] * 5)
@@ -481,7 +485,11 @@ async def analyze_input(
 
         # URLhaus Integration
         try:
-            uh_data = await run_bounded(check_url_with_urlhaus(content), urlhaus_semaphore, 5.0)
+            uh_cache_key = stable_key("urlhaus", content.strip())
+            uh_data = await urlhaus_cache.get(uh_cache_key)
+            if uh_data is None:
+                uh_data = await run_bounded(check_url_with_urlhaus(content), urlhaus_semaphore, 5.0)
+                await urlhaus_cache.set(uh_cache_key, uh_data)
             uh_status = uh_data.get("status")
             if uh_status == "success" and uh_data.get("in_database"):
                 boost = 25
