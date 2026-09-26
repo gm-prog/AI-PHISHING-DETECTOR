@@ -550,6 +550,36 @@ def test_request_body_size_guard_rejects_oversized_payload():
     assert res.status_code == 413
 
 
+def test_limited_body_reader_rejects_oversized_stream():
+    import asyncio
+    from starlette.requests import Request
+    from app.main import _read_limited_request_body, RequestEntityTooLargeError
+
+    messages = iter([
+        {"type": "http.request", "body": b"A" * 70000, "more_body": False},
+    ])
+
+    async def receive():
+        return next(messages)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/analyze",
+            "headers": [],
+            "query_string": b"",
+        },
+        receive,
+    )
+
+    async def exercise():
+        with pytest.raises(RequestEntityTooLargeError):
+            await _read_limited_request_body(request)
+
+    asyncio.run(exercise())
+
+
 def test_analysis_rate_limit_is_enforced_per_anonymous_ip_bucket():
     client = TestClient(app)
     client.get("/api/health")
