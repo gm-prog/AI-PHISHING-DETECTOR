@@ -27,7 +27,7 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 - Authenticated limiter identity is a SHA-256 digest of client IP + opaque session cookie; the raw session token is never returned in the key.
 - Production configuration requires `redis://` or `rediss://` rate-limit storage so quota state is shared across instances.
 
-- **Spoofing**: Mitigated via JWT HS256 authentication (`backend/app/auth.py`) and bcrypt password hashing.
+- **Spoofing**: Mitigated via opaque, server-side session authentication with HttpOnly cookies (`backend/app/auth.py`) and bcrypt password hashing.
 - **Tampering**: Mitigated by strictly ignoring client-supplied role/privilege fields on registration (`test_parameter_tampering_prevention`).
 - **Repudiation**: Operational logs scrubbed of sensitive bearer tokens and Gemini API keys via `SensitiveLogFilter`.
 - **Information Disclosure**: Mitigated by returning sanitized error messages, rejecting unauthenticated `/api/admin/*` access, and adding HTTP security headers (`nosniff`, `DENY`, CSP).
