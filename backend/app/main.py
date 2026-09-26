@@ -468,6 +468,7 @@ def get_all_scans_admin(
 
 # ================= CORE THREAT SCANNER ENDPOINT =================
 @app.post("/api/analyze", response_model=AnalysisResponse)
+@limiter.limit("100/day")
 @limiter.limit("10/minute")
 async def analyze_input(
     request: Request,

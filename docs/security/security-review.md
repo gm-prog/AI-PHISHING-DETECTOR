@@ -21,11 +21,17 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 - **External Intelligence Tier**: VirusTotal API & URLhaus Feed
 
 ### 2.2 STRIDE Analysis
+### 2.3 Analysis Abuse Controls
+- `/api/analyze` enforces two independent fixed-window limits: **10 requests/minute** and **100 requests/day**.
+- Anonymous limiter identity is the stable client IP; the guest history cookie is not part of the limiter key.
+- Authenticated limiter identity is a SHA-256 digest of client IP + opaque session cookie; the raw session token is never returned in the key.
+- Production configuration requires `redis://` or `rediss://` rate-limit storage so quota state is shared across instances.
+
 - **Spoofing**: Mitigated via JWT HS256 authentication (`backend/app/auth.py`) and bcrypt password hashing.
 - **Tampering**: Mitigated by strictly ignoring client-supplied role/privilege fields on registration (`test_parameter_tampering_prevention`).
 - **Repudiation**: Operational logs scrubbed of sensitive bearer tokens and Gemini API keys via `SensitiveLogFilter`.
 - **Information Disclosure**: Mitigated by returning sanitized error messages, rejecting unauthenticated `/api/admin/*` access, and adding HTTP security headers (`nosniff`, `DENY`, CSP).
-- **Denial of Service**: Mitigated via SlowAPI rate limiting (e.g. 10/min on auth, 20/min on analysis).
+- **Denial of Service**: Mitigated via SlowAPI rate limiting (5/min on auth, 10/min + 100/day on `/api/analyze`) with Redis required in production.
 - **Elevation of Privilege**: Mitigated by enforcing server-side Role-Based Access Control (`require_admin` dependency) on all metrics and full-scan telemetry endpoints.
 
 ---

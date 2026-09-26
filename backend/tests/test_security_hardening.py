@@ -595,3 +595,179 @@ def test_analysis_rate_limit_is_enforced_per_anonymous_ip_bucket():
 
     assert [res.status_code for res in responses[:10]] == [200] * 10
     assert responses[10].status_code == 429
+
+
+def _build_rate_limit_request(*, client_ip="203.0.113.10", session=None, guest=None):
+    """Build a minimal Starlette request for testing the real limiter key function."""
+    from app.config import settings
+    from starlette.requests import Request
+
+    cookie_parts = []
+    if session is not None:
+        cookie_parts.append(f"{settings.AUTH_COOKIE_NAME}={session}")
+    if guest is not None:
+        cookie_parts.append(f"{settings.GUEST_COOKIE_NAME}={guest}")
+
+    headers = []
+    if cookie_parts:
+        headers.append((b"cookie", "; ".join(cookie_parts).encode("utf-8")))
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/analyze",
+            "headers": headers,
+            "client": (client_ip, 12345),
+            "query_string": b"",
+        },
+        receive,
+    )
+
+
+def test_analysis_rate_limit_blocks_before_expensive_provider_work(client, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    vt_calls = []
+    urlhaus_calls = []
+
+    async def fake_vt(url, api_key):
+        vt_calls.append(url)
+        return {
+            "status": "skipped",
+            "url": url,
+            "malicious_count": 0,
+            "suspicious_count": 0,
+            "reputation_score": 100,
+            "vendors": [],
+        }
+
+    async def fake_urlhaus(url):
+        urlhaus_calls.append(url)
+        return {
+            "status": "success",
+            "url": url,
+            "in_database": False,
+            "threat_type": None,
+            "date_added": "",
+            "malware_families": [],
+        }
+
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", fake_vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", fake_urlhaus)
+
+    client.get("/api/health")
+    headers = csrf_headers(client)
+
+    responses = []
+    for i in range(11):
+        responses.append(
+            client.post(
+                "/api/analyze",
+                json={
+                    "input_type": "url",
+                    "content": f"https://provider-order-{i}.example/login",
+                },
+                headers=headers,
+            )
+        )
+
+    assert [res.status_code for res in responses[:10]] == [200] * 10
+    assert responses[10].status_code == 429
+    assert len(vt_calls) == 10
+    assert len(urlhaus_calls) == 10
+
+
+def test_analysis_daily_quota_enforces_one_hundred_requests_and_survives_guest_rotation(
+    client, monkeypatch
+):
+    import time
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+
+    fake_now = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: fake_now[0])
+
+    client.get("/api/health")
+    headers = csrf_headers(client)
+    client.cookies.set(settings.GUEST_COOKIE_NAME, "A" * 32)
+
+    responses = []
+    for i in range(100):
+        if i == 50:
+            client.cookies.set(settings.GUEST_COOKIE_NAME, "B" * 32)
+        responses.append(
+            client.post(
+                "/api/analyze",
+                json={
+                    "input_type": "email_text",
+                    "content": f"Routine security review message {i}.",
+                },
+                headers=headers,
+            )
+        )
+        # Advance the synthetic clock past the 1-minute window without sleeping;
+        # the 100/day fixed window remains active across all requests.
+        fake_now[0] += 61
+
+    blocked = client.post(
+        "/api/analyze",
+        json={
+            "input_type": "email_text",
+            "content": "This request must be blocked by the daily quota.",
+        },
+        headers=headers,
+    )
+
+    assert [res.status_code for res in responses] == [200] * 100
+    assert blocked.status_code == 429
+
+
+def test_security_rate_limit_key_ignores_guest_cookie_for_anonymous_requests():
+    from app.main import security_rate_limit_key
+
+    key_a = security_rate_limit_key(
+        _build_rate_limit_request(guest="A" * 32)
+    )
+    key_b = security_rate_limit_key(
+        _build_rate_limit_request(guest="B" * 32)
+    )
+    key_none = security_rate_limit_key(_build_rate_limit_request())
+
+    assert key_a == key_b == key_none
+    assert key_a == "ip:203.0.113.10"
+
+
+def test_authenticated_rate_limit_key_isolated_and_secret_free():
+    from app.main import security_rate_limit_key
+
+    session_token = "opaque-server-session-token-for-regression"
+    authenticated = security_rate_limit_key(
+        _build_rate_limit_request(session=session_token)
+    )
+    authenticated_again = security_rate_limit_key(
+        _build_rate_limit_request(session=session_token)
+    )
+    authenticated_other_ip = security_rate_limit_key(
+        _build_rate_limit_request(
+            client_ip="203.0.113.11",
+            session=session_token,
+        )
+    )
+    anonymous = security_rate_limit_key(_build_rate_limit_request())
+    empty_cookie = security_rate_limit_key(
+        _build_rate_limit_request(session="")
+    )
+
+    assert authenticated.startswith("session:")
+    assert authenticated == authenticated_again
+    assert authenticated != authenticated_other_ip
+    assert authenticated != anonymous
+    assert empty_cookie == anonymous
+    assert session_token not in authenticated
+    assert len(authenticated.split(":", 1)[1]) == 64
