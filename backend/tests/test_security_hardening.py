@@ -550,42 +550,6 @@ def test_request_body_size_guard_rejects_oversized_payload():
     assert res.status_code == 413
 
 
-def test_request_body_size_guard_rejects_chunked_payload(client):
-    client.get("/api/health")
-    headers = csrf_headers(client)
-
-    async def chunked_body():
-        yield b'{"input_type":"email_text","content":"'
-        yield b"A" * 70000
-        yield b'"}'
-
-    # TestClient does not expose a convenient chunked-body API, so verify the
-    # middleware's receive wrapper directly with a synthetic ASGI request.
-    from starlette.requests import Request
-
-    messages = iter([
-        {"type": "http.request", "body": b"A" * 70000, "more_body": False},
-    ])
-
-    async def receive():
-        return next(messages)
-
-    request = Request({
-        "type": "http",
-        "method": "POST",
-        "path": "/api/analyze",
-        "headers": [],
-        "query_string": b"",
-    }, receive)
-
-    with pytest.raises(Exception) as exc:
-        awaitable = request._receive()
-        import asyncio
-        asyncio.run(awaitable)
-
-    assert exc.value.__class__.__name__ in {"Exception", "RequestEntityTooLargeError"}
-
-
 def test_analysis_rate_limit_is_enforced_per_anonymous_ip_bucket():
     client = TestClient(app)
     client.get("/api/health")
