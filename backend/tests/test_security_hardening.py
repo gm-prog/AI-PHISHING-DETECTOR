@@ -688,7 +688,20 @@ def test_analysis_daily_quota_enforces_one_hundred_requests_and_survives_guest_r
     import time
     from app.config import settings
 
-    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-only-placeholder")
+
+    llm_calls = []
+
+    async def fake_llm(input_type, content, api_key, heuristic_score, heuristic_signals):
+        llm_calls.append(content)
+        return {
+            "risk_score": heuristic_score,
+            "status": "safe",
+            "phishing_signals": heuristic_signals,
+            "ai_explanation": "test",
+        }
+
+    monkeypatch.setattr("app.main.analyze_with_llm", fake_llm)
 
     fake_now = [time.time()]
     monkeypatch.setattr(time, "time", lambda: fake_now[0])
@@ -726,6 +739,9 @@ def test_analysis_daily_quota_enforces_one_hundred_requests_and_survives_guest_r
 
     assert [res.status_code for res in responses] == [200] * 100
     assert blocked.status_code == 429
+    assert len(llm_calls) == 100
+    assert "redis" not in blocked.text.lower()
+    assert "storage" not in blocked.text.lower()
 
 
 def test_security_rate_limit_key_ignores_guest_cookie_for_anonymous_requests():
