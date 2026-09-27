@@ -6,13 +6,16 @@ from typing import Optional
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 
 from app.config import settings
 from app.db import get_db
 from app.models.domain import User, UserSession
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Non-secret dummy hash used for unknown-account login attempts so password work
+# remains comparable without revealing whether an email exists.
+DUMMY_PASSWORD_HASH = pwd_context.hash("sentinel-invalid-login-probe")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -32,6 +35,16 @@ def create_user_session(user: User, db: Session) -> str:
     session_id = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     expires = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    # Remove only dead session records for this user. Active sessions on other
+    # devices remain valid.
+    db.query(UserSession).filter(
+        UserSession.user_id == user.id,
+        or_(
+            UserSession.revoked_at.is_not(None),
+            UserSession.expires_at <= now.isoformat(),
+        ),
+    ).delete(synchronize_session=False)
 
     db.add(UserSession(
         id=str(uuid.uuid4()),
