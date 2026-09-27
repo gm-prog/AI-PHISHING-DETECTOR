@@ -787,3 +787,104 @@ def test_authenticated_rate_limit_key_isolated_and_secret_free():
     assert empty_cookie == anonymous
     assert session_token not in authenticated
     assert len(authenticated.split(":", 1)[1]) == 64
+
+
+def test_login_does_not_enumerate_accounts_or_inactive_users(client):
+    client.get("/api/health")
+    password = "SecurePassword123!"
+    active_email = f"active_{uuid.uuid4().hex[:6]}@example.com"
+    inactive_email = f"inactive_{uuid.uuid4().hex[:6]}@example.com"
+
+    assert register(client, active_email, password).status_code == 200
+
+    db = TestingSessionLocal()
+    try:
+        inactive = User(
+            id=str(uuid.uuid4()),
+            email=inactive_email,
+            hashed_password=get_password_hash(password),
+            role="user",
+            is_active=False,
+        )
+        db.add(inactive)
+        db.commit()
+    finally:
+        db.close()
+
+    unknown = login(client, f"unknown_{uuid.uuid4().hex[:6]}@example.com", password)
+    inactive = login(client, inactive_email, password)
+
+    assert unknown.status_code == 401
+    assert inactive.status_code == 401
+    assert unknown.json()["detail"] == inactive.json()["detail"] == "Invalid email or password."
+
+
+def test_successful_login_ignores_preexisting_session_cookie(client):
+    client.get("/api/health")
+    email = f"fixation_{uuid.uuid4().hex[:6]}@example.com"
+    password = "SecurePassword123!"
+    assert register(client, email, password).status_code == 200
+
+    attacker = TestClient(app)
+    attacker.get("/api/health")
+    attacker.cookies.set("sentinel_session", "attacker-preseeded-session")
+
+    res = login(attacker, email, password)
+    assert res.status_code == 200
+
+    fresh_session = attacker.cookies.get("sentinel_session")
+    assert fresh_session
+    assert fresh_session != "attacker-preseeded-session"
+    assert attacker.get("/api/auth/me").status_code == 200
+
+
+def test_session_creation_removes_only_dead_sessions_for_same_user(client):
+    from app.auth import create_user_session, _hash_session_id
+    from datetime import datetime, timedelta, timezone
+
+    email = f"session_cleanup_{uuid.uuid4().hex[:6]}@example.com"
+    password = "SecurePassword123!"
+    assert register(client, email, password).status_code == 200
+
+    db = TestingSessionLocal()
+    try:
+        user = db.query(User).filter(User.email == email).one()
+        now = datetime.now(timezone.utc)
+        dead = UserSession(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            session_id_hash=_hash_session_id("dead-session"),
+            created_at=(now - timedelta(days=2)).isoformat(),
+            expires_at=(now - timedelta(days=1)).isoformat(),
+            revoked_at=None,
+        )
+        revoked = UserSession(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            session_id_hash=_hash_session_id("revoked-session"),
+            created_at=(now - timedelta(days=2)).isoformat(),
+            expires_at=(now + timedelta(days=1)).isoformat(),
+            revoked_at=now.isoformat(),
+        )
+        active = UserSession(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            session_id_hash=_hash_session_id("active-session"),
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(days=1)).isoformat(),
+            revoked_at=None,
+        )
+        db.add_all([dead, revoked, active])
+        db.commit()
+
+        create_user_session(user, db)
+
+        remaining = db.query(UserSession).filter(UserSession.user_id == user.id).all()
+        hashes = {row.session_id_hash for row in remaining}
+        assert _hash_session_id("dead-session") not in hashes
+        assert _hash_session_id("revoked-session") not in hashes
+        assert _hash_session_id("active-session") in hashes
+        assert len(remaining) == 2
+    finally:
+        db.close()
+
