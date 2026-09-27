@@ -377,20 +377,20 @@ async def register(request: Request, response: Response, body: UserCreate, db: S
 @app.post("/api/auth/login", response_model=AuthResponse)
 @limiter.limit("5/minute")
 async def login(request: Request, response: Response, body: UserLogin, db: Session = Depends(get_db)):
-    """Authenticates credentials and establishes an HttpOnly session."""
+    """Authenticates credentials and establishes a fresh HttpOnly session."""
     user = db.query(User).filter(User.email == body.email).first()
-    if not user or not verify_password(body.password, user.hashed_password):
+    password_hash = user.hashed_password if user else DUMMY_PASSWORD_HASH
+    password_valid = verify_password(body.password, password_hash)
+
+    if not user or not password_valid or not user.is_active:
+        # Keep account existence and inactive state out of the public response.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password."
         )
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is inactive or suspended."
-        )
-
+    # A new opaque session is created on every successful login. Any pre-existing
+    # client cookie is ignored, preventing session fixation.
     session_token = create_user_session(user, db)
     _set_auth_cookies(response, session_token)
     logger.info("[AUTH] User login successful.")
