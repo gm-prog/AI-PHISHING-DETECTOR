@@ -1,7 +1,8 @@
 import re
 from email.parser import HeaderParser
 from urllib.parse import urlparse
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+from app.config import settings
 from app.services.url_service import analyze_url
 
 # Keywords indicating urgency, fear, or financial pressure typical in phishing
@@ -16,19 +17,40 @@ PHISHING_KEYWORDS = {
     r"\bsecure\b.{0,150}\blogin\b": ("medium", 20, "Security Portal Reference", "Promises a 'secure' login page, which is frequently the label of a credential harvester.")
 }
 
-def extract_urls(text: str) -> List[str]:
-    """Extracts all URLs from a string block using regex."""
+def extract_bounded_urls(text: str, max_urls: int = 25) -> Tuple[List[str], bool, int]:
+    """
+    Extracts unique standardized URLs from a string block up to max_urls without unbounded memory accumulation.
+    Returns (urls, was_truncated, total_found_estimate).
+    """
     url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+'
-    urls = re.findall(url_pattern, text)
+    seen = set()
     standardized = []
-    for u in urls:
-        if u.startswith('www.'):
-            standardized.append('http://' + u)
-        else:
-            standardized.append(u)
-    return list(set(standardized))
+    total_found = 0
+    was_truncated = False
 
-def analyze_email_text(text: str) -> Dict[str, Any]:
+    for match in re.finditer(url_pattern, text):
+        raw = match.group(0)
+        u = 'http://' + raw if raw.startswith('www.') else raw
+        if u not in seen:
+            seen.add(u)
+            if len(standardized) < max_urls:
+                standardized.append(u)
+            else:
+                was_truncated = True
+                total_found += 1
+                if total_found >= 1000:
+                    break
+
+    total_count = len(standardized) + total_found
+    return standardized, was_truncated, total_count
+
+def extract_urls(text: str, max_urls: Optional[int] = None) -> List[str]:
+    """Extracts unique URLs from a string block up to max_urls (defaults to settings.MAX_EXTRACTED_URLS)."""
+    limit = max_urls if max_urls is not None else settings.MAX_EXTRACTED_URLS
+    urls, _, _ = extract_bounded_urls(text, max_urls=limit)
+    return urls
+
+def analyze_email_text(text: str, max_urls: Optional[int] = None) -> Dict[str, Any]:
     """
     Analyzes email body text for keywords and embedded URLs using weighted scoring rules.
     """
@@ -52,8 +74,9 @@ def analyze_email_text(text: str) -> Dict[str, Any]:
                 "description": desc
             })
             
-    # 2. Extract and analyze nested URLs
-    urls = extract_urls(text)
+    # 2. Extract and analyze nested URLs within configured budget
+    limit = max_urls if max_urls is not None else settings.MAX_EXTRACTED_URLS
+    urls, links_truncated, total_links_count = extract_bounded_urls(text, max_urls=limit)
     nested_analyses = []
     high_risk_urls_count = 0
     link_score_acc = 0
@@ -106,6 +129,8 @@ def analyze_email_text(text: str) -> Dict[str, Any]:
         "signals": signals,
         "details": {
             "links_found": urls,
+            "links_analyzed": len(urls),
+            "links_truncated": links_truncated,
             "links_analysis": nested_analyses,
             "keyword_flags_count": len(signals) - len(nested_analyses)
         }

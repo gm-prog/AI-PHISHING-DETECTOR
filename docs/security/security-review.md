@@ -21,10 +21,15 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 - **External Intelligence Tier**: VirusTotal API & URLhaus Feed
 
 ### 2.2 STRIDE Analysis
-### 2.3 Analysis Abuse Controls
-- `/api/analyze` enforces two independent fixed-window limits: **10 requests/minute** and **100 requests/day**.
-- Anonymous limiter identity is the stable client IP; the guest history cookie is not part of the limiter key.
-- Authenticated limiter identity is a SHA-256 digest of client IP + opaque session cookie; the raw session token is never returned in the key.
+### 2.3 Analysis Abuse & AI Gateway Controls (Gateway v1)
+- `/api/analyze` enforces two independent fixed-window limits: **10 requests/minute** (burst protection) and **100 requests/day** (daily expensive-analysis quota).
+- **Stable Account Quota**: The daily quota is keyed to the stable database user ID (`analysis-user:<sha256(user_id)>`) for authenticated users, persisting across session renewals and re-logins.
+- **Anonymous Quota**: Anonymous requests are keyed to client IP (`ip:<client_ip>`), preventing guest-cookie rotation bypass.
+- **Burst Isolation**: Authenticated burst limiter identity is a SHA-256 digest of client IP + opaque session token (`session:<hash>`).
+- **Gemini No-Storage Mode**: All Gemini requests explicitly specify `store=False` on the Interactions API to enforce non-persistence of user-submitted phishing artifacts. Raw prompts, raw responses, and user payloads are excluded from logs and persistent scan history.
+- **Embedded URL Budget**: Email analysis bounds embedded URL processing to `MAX_EXTRACTED_URLS` (default: 25) before running heuristic or external intel checks, mitigating resource amplification.
+- **Bounded Provider Queue**: Concurrency slots for Gemini, VirusTotal, and URLhaus require acquiring semaphore permits within a bounded queue timeout (2.0s) before executing operations with independent hard timeouts.
+- **Sanitized Provider Contracts**: VirusTotal and URLhaus results are normalized into minimal public schemas; `raw_response`, internal headers, and raw exception messages are stripped.
 - Production configuration requires `redis://` or `rediss://` rate-limit storage so quota state is shared across instances.
 
 - **Spoofing**: Mitigated via opaque, server-side session authentication with HttpOnly cookies (`backend/app/auth.py`) and bcrypt password hashing.

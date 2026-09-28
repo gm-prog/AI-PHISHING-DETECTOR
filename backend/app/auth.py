@@ -89,6 +89,12 @@ def _get_user_from_session(session_id: Optional[str], db: Session) -> Optional[U
     )
 
 
+def get_user_id_from_session(session_id: Optional[str], db: Session) -> Optional[str]:
+    """Resolves user_id from an active session for stable account-level quota tracking."""
+    user = _get_user_from_session(session_id, db)
+    return str(user.id) if user else None
+
+
 def get_current_user(
     request: Request,
     db: Session = Depends(get_db),

@@ -50,7 +50,38 @@ virustotal_semaphore = asyncio.Semaphore(4)
 urlhaus_semaphore = asyncio.Semaphore(8)
 
 
-async def run_bounded(awaitable, semaphore: asyncio.Semaphore, timeout_seconds: float):
-    """Run one provider operation with a concurrency cap and hard timeout."""
-    async with semaphore:
-        return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+class ProviderQueueExhaustedError(Exception):
+    """Raised when provider capacity cannot be acquired within the bounded queue wait timeout."""
+    pass
+
+
+async def run_bounded(
+    coro_or_factory,
+    semaphore: asyncio.Semaphore,
+    timeout_seconds: float = 6.0,
+    acquire_timeout_seconds: float = 2.0,
+) -> Any:
+    """
+    Run one provider operation with a concurrency cap, bounded queue wait, and hard timeout.
+
+    Queue wait is bounded independently from the operation execution timeout.
+    """
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=acquire_timeout_seconds)
+    except asyncio.TimeoutError:
+        if asyncio.iscoroutine(coro_or_factory):
+            coro_or_factory.close()
+        raise ProviderQueueExhaustedError("Provider capacity wait timeout exceeded.")
+
+    try:
+        if asyncio.iscoroutine(coro_or_factory):
+            return await asyncio.wait_for(coro_or_factory, timeout=timeout_seconds)
+        elif callable(coro_or_factory):
+            res = coro_or_factory()
+            if asyncio.iscoroutine(res):
+                return await asyncio.wait_for(res, timeout=timeout_seconds)
+            return res
+        else:
+            raise TypeError("coro_or_factory must be a coroutine or callable returning a coroutine")
+    finally:
+        semaphore.release()

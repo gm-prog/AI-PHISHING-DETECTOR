@@ -12,21 +12,14 @@ logger = logging.getLogger(__name__)
 
 async def analyze_url_with_virustotal(url: str, api_key: str) -> Dict[str, Any]:
     """
-    Analyze a URL using the VirusTotal v3 API (free tier: 500 requests/day).
+    Analyze a URL using the VirusTotal v3 API.
 
-    Args:
-        url: The URL string to analyze.
-        api_key: VirusTotal API key.
-
-    Returns:
-        Dict with keys: status, url, malicious_count, suspicious_count,
-        reputation_score, vendors, last_scan_date, categories, vt_scan_id.
+    Returns normalized contract with keys:
+        status, malicious_count, suspicious_count, reputation_score, vendors.
     """
     if not api_key or not api_key.strip():
         return {
             "status": "skipped",
-            "reason": "VirusTotal API key not configured",
-            "url": url,
             "malicious_count": 0,
             "suspicious_count": 0,
             "reputation_score": 100,
@@ -36,8 +29,14 @@ async def analyze_url_with_virustotal(url: str, api_key: str) -> Dict[str, Any]:
     try:
         import aiohttp
     except ImportError:
-        logger.error("aiohttp not installed. Run: pip install aiohttp>=3.9.0")
-        return {"status": "error", "url": url, "error": "aiohttp not installed"}
+        logger.error("provider=virustotal event=missing_dependency")
+        return {
+            "status": "error",
+            "malicious_count": 0,
+            "suspicious_count": 0,
+            "reputation_score": 50,
+            "vendors": [],
+        }
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -53,32 +52,27 @@ async def analyze_url_with_virustotal(url: str, api_key: str) -> Dict[str, Any]:
                 timeout=aiohttp.ClientTimeout(total=8),
             ) as resp:
                 if resp.status == 429:
-                    logger.warning("VirusTotal rate limit hit.")
+                    logger.warning("provider=virustotal event=rate_limited")
                     return {
                         "status": "rate_limited",
-                        "url": url,
-                        "message": "VirusTotal daily quota exceeded",
                         "malicious_count": 0,
                         "suspicious_count": 0,
                         "reputation_score": 50,
                         "vendors": [],
                     }
                 if resp.status == 401:
-                    logger.error("Invalid VirusTotal API key.")
+                    logger.warning("provider=virustotal event=auth_failed")
                     return {
                         "status": "error",
-                        "url": url,
-                        "message": "Invalid VirusTotal API key",
                         "malicious_count": 0,
                         "suspicious_count": 0,
                         "reputation_score": 50,
                         "vendors": [],
                     }
                 if resp.status != 200:
+                    logger.warning("provider=virustotal event=submit_failed status=%s", resp.status)
                     return {
                         "status": "error",
-                        "url": url,
-                        "code": resp.status,
                         "malicious_count": 0,
                         "suspicious_count": 0,
                         "reputation_score": 50,
@@ -89,7 +83,13 @@ async def analyze_url_with_virustotal(url: str, api_key: str) -> Dict[str, Any]:
                 scan_id = submit_result.get("data", {}).get("id", "")
 
             if not scan_id:
-                return {"status": "error", "url": url, "error": "No scan ID returned"}
+                return {
+                    "status": "error",
+                    "malicious_count": 0,
+                    "suspicious_count": 0,
+                    "reputation_score": 50,
+                    "vendors": [],
+                }
 
             # Step 2: Fetch scan results
             async with session.get(
@@ -98,9 +98,9 @@ async def analyze_url_with_virustotal(url: str, api_key: str) -> Dict[str, Any]:
                 timeout=aiohttp.ClientTimeout(total=8),
             ) as resp2:
                 if resp2.status != 200:
+                    logger.warning("provider=virustotal event=fetch_failed status=%s", resp2.status)
                     return {
                         "status": "error",
-                        "url": url,
                         "malicious_count": 0,
                         "suspicious_count": 0,
                         "reputation_score": 50,
@@ -112,48 +112,40 @@ async def analyze_url_with_virustotal(url: str, api_key: str) -> Dict[str, Any]:
                 stats = attrs.get("stats", {})
                 last_results = attrs.get("results", {})
 
-                malicious_count = stats.get("malicious", 0)
-                suspicious_count = stats.get("suspicious", 0)
+                malicious_count = int(stats.get("malicious", 0))
+                suspicious_count = int(stats.get("suspicious", 0))
 
                 # Reputation: 100 = clean, reduced by detections
                 reputation_score = max(0, 100 - (malicious_count * 10) - (suspicious_count * 3))
 
                 # Collect vendor names that flagged as malware/phishing (top 5)
                 malicious_vendors = [
-                    vendor
+                    str(vendor)
                     for vendor, result in last_results.items()
-                    if result.get("category") in ("malware", "phishing")
+                    if isinstance(result, dict) and result.get("category") in ("malware", "phishing")
                 ][:5]
 
                 return {
                     "status": "success",
-                    "url": url,
-                    "vt_scan_id": scan_id,
                     "malicious_count": malicious_count,
                     "suspicious_count": suspicious_count,
                     "reputation_score": reputation_score,
                     "vendors": malicious_vendors,
-                    "last_scan_date": str(attrs.get("date", "")),
-                    "categories": attrs.get("categories", {}),
                 }
 
     except asyncio.TimeoutError:
-        logger.warning("VirusTotal provider timeout")
+        logger.warning("provider=virustotal event=timeout")
         return {
             "status": "timeout",
-            "url": url,
-            "message": "VirusTotal request timed out",
             "malicious_count": 0,
             "suspicious_count": 0,
             "reputation_score": 50,
             "vendors": [],
         }
-    except Exception as e:
-        logger.error("VirusTotal provider failure")
+    except Exception:
+        logger.error("provider=virustotal event=unexpected_error")
         return {
             "status": "error",
-            "url": url,
-            "error": str(e),
             "malicious_count": 0,
             "suspicious_count": 0,
             "reputation_score": 50,
