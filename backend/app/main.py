@@ -37,7 +37,8 @@ from app.auth import (
     get_optional_current_user,
     require_admin,
     create_user_session,
-    revoke_session
+    revoke_session,
+    DUMMY_PASSWORD_HASH,
 )
 from app.services.url_service import analyze_url
 from app.services.email_service import analyze_email_text, analyze_email_headers
