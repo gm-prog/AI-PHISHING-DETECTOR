@@ -827,14 +827,23 @@ def test_successful_login_ignores_preexisting_session_cookie(client):
 
     attacker = TestClient(app)
     attacker.get("/api/health")
-    attacker.cookies.set("sentinel_session", "attacker-preseeded-session")
+    attacker.cookies.set(
+        "sentinel_session",
+        "attacker-preseeded-session",
+        domain="testserver.local",
+        path="/",
+    )
 
     res = login(attacker, email, password)
     assert res.status_code == 200
 
-    fresh_session = attacker.cookies.get("sentinel_session")
-    assert fresh_session
-    assert fresh_session != "attacker-preseeded-session"
+    scoped_cookie = attacker.cookies.get(
+        "sentinel_session",
+        domain="testserver.local",
+        path="/",
+    )
+    assert scoped_cookie
+    assert scoped_cookie != "attacker-preseeded-session"
     assert attacker.get("/api/auth/me").status_code == 200
 
 
@@ -884,7 +893,9 @@ def test_session_creation_removes_only_dead_sessions_for_same_user(client):
         assert _hash_session_id("dead-session") not in hashes
         assert _hash_session_id("revoked-session") not in hashes
         assert _hash_session_id("active-session") in hashes
-        assert len(remaining) == 2
+        # The original registration session remains active as well as the
+        # manually inserted active session and the newly-created session.
+        assert len(remaining) == 3
     finally:
         db.close()
 
