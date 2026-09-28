@@ -64,6 +64,10 @@ def verify_gemini_key(api_key: str) -> Dict[str, Any]:
             client.models.generate_content(
                 model="models/gemini-3.6-flash",
                 contents="Verify connection test.",
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    cached_content=None,
+                ),
             )
         logger.info("[SECURE] Gemini API key verification succeeded.")
         return {"valid": True}
@@ -167,6 +171,7 @@ Please analyze this input and provide the final risk score, status classificatio
                     response_schema=LlmPhishingAnalysisSchema,
                     system_instruction=SYSTEM_INSTRUCTION,
                     temperature=0.2,
+                    cached_content=None,
                 ),
             )
             raw_text = response.text
@@ -179,6 +184,7 @@ Please analyze this input and provide the final risk score, status classificatio
                 response_schema=LlmPhishingAnalysisSchema,
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.2,
+                cached_content=None,
             ),
         )
         raw_text = response.text

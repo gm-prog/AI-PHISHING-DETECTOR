@@ -26,7 +26,7 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 - **Stable Account Quota**: The daily quota is keyed to the stable database user ID (`analysis-user:<sha256(user_id)>`) for authenticated users, persisting across session renewals and re-logins.
 - **Anonymous Quota**: Anonymous requests are keyed to client IP (`ip:<client_ip>`), preventing guest-cookie rotation bypass.
 - **Burst Isolation**: Authenticated burst limiter identity is a SHA-256 digest of client IP + opaque session token (`session:<hash>`).
-- **Gemini No-Storage Mode**: All Gemini requests explicitly specify `store=False` on the Interactions API to enforce non-persistence of user-submitted phishing artifacts. Raw prompts, raw responses, and user payloads are excluded from logs and persistent scan history.
+- **Gemini No-Storage Mode**: All Gemini requests explicitly specify `store=False` on the Interactions API (and `cached_content=None` on compatibility/generate_content fallback paths) to enforce non-persistence of user-submitted phishing artifacts. Raw prompts, raw LLM completions, and raw third-party API responses are excluded from logs and persistent storage. Application-level `ScanHistory` records retain only a truncated 100-character input preview for user dashboard presentation.
 - **Embedded URL Budget**: Email analysis bounds embedded URL processing to `MAX_EXTRACTED_URLS` (default: 25) before running heuristic or external intel checks, mitigating resource amplification.
 - **Bounded Provider Queue**: Concurrency slots for Gemini, VirusTotal, and URLhaus require acquiring semaphore permits within a bounded queue timeout (2.0s) before executing operations with independent hard timeouts.
 - **Sanitized Provider Contracts**: VirusTotal and URLhaus results are normalized into minimal public schemas; `raw_response`, internal headers, and raw exception messages are stripped.
@@ -90,7 +90,7 @@ tests\test_security_hardening.py ...........                             [100%]
 | **14. Restrict Uploads** | Not Applicable | No direct file uploads enabled on Gateway | N/A |
 | **15. Secure Server Logic** | Implemented | `backend/app/services/llm_service.py` (Gemini 3.6 Flash) | VERIFIED |
 | **16. Trim API Responses** | Implemented | `backend/app/models/schemas.py` (`UserOut`) | VERIFIED |
-| **17. Secure Auth Sessions** | Implemented | `backend/app/auth.py` (JWT HS256, bcrypt) | VERIFIED (`test_user_registration_and_login`) |
+| **17. Secure Auth Sessions** | Implemented | `backend/app/auth.py` (Opaque Session Cookies, bcrypt) | VERIFIED (`test_user_registration_and_login`) |
 | **18. Scan Dependencies** | Implemented | `npm audit` & `pip` package verification | VERIFIED |
 | **19. Test Record Access** | Implemented | `backend/app/main.py` (`delete_history`) | VERIFIED (`test_scoped_history_bulk_clear`) |
 | **20. Attack Your Own App** | Implemented | `backend/tests/test_security_hardening.py` | VERIFIED (11/11 Passed) |

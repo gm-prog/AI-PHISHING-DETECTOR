@@ -104,11 +104,17 @@ def security_rate_limit_key(request: Request) -> str:
 def security_daily_analysis_quota_key(request: Request) -> str:
     """
     Stable account-level rate limit key for the daily expensive-analysis quota.
-    - Authenticated: derived from stable db user_id (analysis-user:<sha256(user_id)>).
-      Survives session renewal/rotation across logout/login cycles.
+    - Authenticated: derived from stable db user_id (analysis-user:<sha256(user_id)>),
+      resolved once during request pipeline onto request.state.
     - Anonymous: derived from client IP (ip:<client_ip>), matching the anonymous burst limiter.
       Guest cookie rotation cannot reset this bucket.
     """
+    # 1. Fast path: Read pre-resolved quota identity from request.state (0 DB calls in limiter)
+    precomputed = getattr(request.state, "analysis_quota_key", None)
+    if precomputed:
+        return precomputed
+
+    # 2. Fallback for direct invocations / standalone tests without ASGI middleware pipeline
     session_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
     if session_token:
         user_id = None
@@ -248,6 +254,43 @@ def _set_auth_cookies(response: Response, session_token: str) -> None:
 def _clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(settings.AUTH_COOKIE_NAME, path="/")
     response.delete_cookie(settings.CSRF_COOKIE_NAME, path="/")
+
+@app.middleware("http")
+async def auth_context_middleware(request: Request, call_next):
+    """
+    Resolves session authentication once per request lifecycle, precomputing the stable
+    account quota identity on request.state before route handlers or SlowAPI rate limiting run.
+    """
+    session_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if session_token:
+        try:
+            db_factory = app.dependency_overrides.get(get_db, get_db)
+            gen = db_factory()
+            if inspect.isgenerator(gen):
+                try:
+                    db = next(gen)
+                    user_id = get_user_id_from_session(session_token, db)
+                finally:
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+            elif hasattr(gen, "__enter__"):
+                with gen as db:
+                    user_id = get_user_id_from_session(session_token, db)
+            else:
+                user_id = get_user_id_from_session(session_token, gen)
+                if hasattr(gen, "close"):
+                    gen.close()
+
+            if user_id:
+                request.state.auth_user_id = user_id
+                user_hash = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()
+                request.state.analysis_quota_key = f"analysis-user:{user_hash}"
+        except Exception as e:
+            logger.warning("auth_context_middleware session lookup error: %s", e)
+
+    return await call_next(request)
 
 @app.middleware("http")
 async def csrf_protection(request: Request, call_next):
