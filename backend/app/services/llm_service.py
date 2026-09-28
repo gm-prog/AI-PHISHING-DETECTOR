@@ -3,14 +3,17 @@ from google.genai import types
 from google.genai.errors import APIError
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
+import asyncio
 import json
 import logging
+import re
 
 from app.services.provider_guard import llm_cache, llm_semaphore, stable_key
 
 # Setup clean, readable logger formatting
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("phishing_detector.llm_service")
+
 
 # Define Pydantic models for Gemini structured output
 class LlmPhishingSignal(BaseModel):
@@ -19,11 +22,13 @@ class LlmPhishingSignal(BaseModel):
     title: str = Field(..., description="A short, catchy title summarizing the warning sign")
     description: str = Field(..., description="Explanation of why this was flagged and what it means to the user")
 
+
 class LlmPhishingAnalysisSchema(BaseModel):
     risk_score: int = Field(..., description="Integer from 0 to 100 indicating the safety score (0 is completely safe, 100 is certain phishing)")
     status: str = Field(..., description="Classification: 'safe', 'warning', or 'danger'")
     phishing_signals: List[LlmPhishingSignal] = Field(default=[], description="List of social-engineering or technical anomalies detected")
     ai_explanation: str = Field(..., description="A comprehensive explanation formatted in Markdown detailing the threat analysis, suspicious elements, and safety advice.")
+
 
 SYSTEM_INSTRUCTION = """
 You are an advanced AI Cybersecurity Specialist specializing in Phishing and Social Engineering analysis.
@@ -41,6 +46,7 @@ You will receive a list of rule-based heuristic signals already detected by the 
 Format the 'ai_explanation' field strictly in beautiful Markdown, including bullet points and headers. Do not output anything outside the requested JSON schema.
 """
 
+
 def verify_gemini_key(api_key: str) -> Dict[str, Any]:
     """Validate a Gemini key without returning provider diagnostics or key material."""
     if not api_key or not api_key.strip():
@@ -52,11 +58,16 @@ def verify_gemini_key(api_key: str) -> Dict[str, Any]:
             client.interactions.create(
                 model="models/gemini-3.6-flash",
                 input="Verify connection test.",
+                store=False,
             )
         else:
             client.models.generate_content(
                 model="models/gemini-3.6-flash",
                 contents="Verify connection test.",
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    cached_content=None,
+                ),
             )
         logger.info("[SECURE] Gemini API key verification succeeded.")
         return {"valid": True}
@@ -64,10 +75,11 @@ def verify_gemini_key(api_key: str) -> Dict[str, Any]:
         logger.warning("[SECURE] Gemini API key verification failed.")
         return {"valid": False, "error": "Gemini API authentication failed."}
 
+
 def get_fallback_analysis(input_type: str, content: str, heuristic_score: int, heuristic_signals: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Provides a graceful fallback report when Gemini API is unavailable or unconfigured."""
     logger.warning("Gemini API key not configured or failed. Generating fallback rule-based analysis.")
-    
+
     # Calculate a rough score based on heuristic rules
     final_score = heuristic_score
     status = "safe"
@@ -75,7 +87,7 @@ def get_fallback_analysis(input_type: str, content: str, heuristic_score: int, h
         status = "danger"
     elif final_score >= 30:
         status = "warning"
-        
+
     ai_explanation = f"""### Heuristic Analysis Report (AI Analysis Offline)
 
 *Note: The Gemini AI engine could not be contacted because the API Key is unconfigured or invalid. A heuristic fallback analysis was run instead.*
@@ -92,7 +104,7 @@ def get_fallback_analysis(input_type: str, content: str, heuristic_score: int, h
     else:
         for idx, sig in enumerate(heuristic_signals, 1):
             ai_explanation += f"\n{idx}. **[{sig['severity'].upper()}] {sig['title']}**\n   {sig['description']}\n"
-            
+
     ai_explanation += "\n#### Recommended Safety Steps\n"
     if status == "danger":
         ai_explanation += "- **Do not interact** with this content, click any links, or enter credentials.\n- Delete or report the email/URL immediately.\n"
@@ -100,7 +112,7 @@ def get_fallback_analysis(input_type: str, content: str, heuristic_score: int, h
         ai_explanation += "- Exercise extreme caution. Verify the sender/domain through independent channels (e.g. bookmarks or official app).\n"
     else:
         ai_explanation += "- The input seems relatively safe, but always verify sender credentials and secure lock symbols in your browser.\n"
-        
+
     return {
         "risk_score": final_score,
         "status": status,
@@ -108,28 +120,18 @@ def get_fallback_analysis(input_type: str, content: str, heuristic_score: int, h
         "ai_explanation": ai_explanation
     }
 
-async def analyze_with_llm(
-    input_type: str, content: str, api_key: Optional[str], heuristic_score: int,
-    heuristic_signals: List[Dict[str, Any]]
+
+def _execute_gemini_call(
+    input_type: str,
+    content: str,
+    api_key: str,
+    heuristic_score: int,
+    heuristic_signals: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Analyze content with Gemini while bounding concurrency and repeat spend."""
-    if not api_key:
-        logger.info("Skipping LLM analysis: no server-side API key configured.")
-        return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
-
-    cache_key = stable_key("llm", f"{input_type}|{content}|{heuristic_score}|{json.dumps(heuristic_signals, sort_keys=True)}")
-    cached = await llm_cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    async with llm_semaphore:
-        cached = await llm_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        try:
-            client = genai.Client(api_key=api_key.strip())
-            heuristics_summary = json.dumps(heuristic_signals, indent=2)
-            prompt = f"""
+    """Synchronous worker that calls Gemini client with store=False."""
+    client = genai.Client(api_key=api_key.strip())
+    heuristics_summary = json.dumps(heuristic_signals, indent=2)
+    prompt = f"""
 Input Type: {input_type}
 Content to Analyze:
 ---
@@ -143,52 +145,126 @@ Heuristics Detected by Rules:
 
 Please analyze this input and provide the final risk score, status classification, merged warning signals, and your detailed AI report in markdown.
 """
-            raw_text = ""
-            if hasattr(client, "interactions"):
-                try:
-                    interaction = client.interactions.create(
-                        model="models/gemini-3.6-flash", input=prompt, system_instruction=SYSTEM_INSTRUCTION,
-                        response_mime_type="application/json", response_schema=LlmPhishingAnalysisSchema,
-                    )
-                    raw_text = getattr(interaction, "output_text", "") or getattr(interaction, "text", "") or str(interaction)
-                except Exception:
-                    logger.warning("Gemini interactions request failed; using compatibility API.")
-                    response = client.models.generate_content(
-                        model="models/gemini-3.6-flash", contents=prompt,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json", response_schema=LlmPhishingAnalysisSchema,
-                            system_instruction=SYSTEM_INSTRUCTION, temperature=0.2,
-                        ),
-                    )
-                    raw_text = response.text
-            else:
-                response = client.models.generate_content(
-                    model="models/gemini-3.6-flash", contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json", response_schema=LlmPhishingAnalysisSchema,
-                        system_instruction=SYSTEM_INSTRUCTION, temperature=0.2,
-                    ),
-                )
-                raw_text = response.text
-            clean_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip(), flags=re.IGNORECASE)
-            result_json = json.loads(clean_text)
-            existing_ids = {sig["id"] for sig in result_json.get("phishing_signals", [])}
-            merged_signals = list(result_json.get("phishing_signals", []))
-            for sig in heuristic_signals:
-                if sig["id"] not in existing_ids:
-                    merged_signals.append(sig)
-                    existing_ids.add(sig["id"])
-            llm_score = max(0, min(100, int(result_json.get("risk_score", 0))))
-            final_score = max(heuristic_score, llm_score)
-            final_status = "danger" if final_score >= 70 else "warning" if final_score >= 30 else "safe"
-            result = {
-                "risk_score": final_score, "status": final_status, "phishing_signals": merged_signals,
-                "ai_explanation": result_json.get("ai_explanation", "No explanation generated."),
-            }
-            await llm_cache.set(cache_key, result)
-            return result
-        except APIError as e:
-            logger.warning("Gemini provider request failed (provider status=%s).", getattr(e, "code", "unknown"))
+    raw_text = ""
+    if hasattr(client, "interactions"):
+        try:
+            interaction = client.interactions.create(
+                model="models/gemini-3.6-flash",
+                input=prompt,
+                system_instruction=SYSTEM_INSTRUCTION,
+                response_mime_type="application/json",
+                response_schema=LlmPhishingAnalysisSchema,
+                store=False,
+            )
+            raw_text = (
+                getattr(interaction, "output_text", "")
+                or getattr(interaction, "text", "")
+                or str(interaction)
+            )
         except Exception:
-            logger.exception("LLM analysis failed without exposing provider response details.")
+            logger.warning("Gemini interactions request failed; using compatibility API.")
+            response = client.models.generate_content(
+                model="models/gemini-3.6-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=LlmPhishingAnalysisSchema,
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=0.2,
+                    cached_content=None,
+                ),
+            )
+            raw_text = response.text
+    else:
+        response = client.models.generate_content(
+            model="models/gemini-3.6-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=LlmPhishingAnalysisSchema,
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.2,
+                cached_content=None,
+            ),
+        )
+        raw_text = response.text
+
+    clean_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip(), flags=re.IGNORECASE)
+    result_json = json.loads(clean_text)
+    existing_ids = {sig["id"] for sig in result_json.get("phishing_signals", [])}
+    merged_signals = list(result_json.get("phishing_signals", []))
+    for sig in heuristic_signals:
+        if sig["id"] not in existing_ids:
+            merged_signals.append(sig)
+            existing_ids.add(sig["id"])
+    llm_score = max(0, min(100, int(result_json.get("risk_score", 0))))
+    final_score = max(heuristic_score, llm_score)
+    final_status = "danger" if final_score >= 70 else "warning" if final_score >= 30 else "safe"
+    return {
+        "risk_score": final_score,
+        "status": final_status,
+        "phishing_signals": merged_signals,
+        "ai_explanation": result_json.get("ai_explanation", "No explanation generated."),
+    }
+
+
+async def analyze_with_llm(
+    input_type: str,
+    content: str,
+    api_key: Optional[str],
+    heuristic_score: int,
+    heuristic_signals: List[Dict[str, Any]],
+    acquire_timeout_seconds: float = 2.0,
+    request_timeout_seconds: float = 10.0,
+) -> Dict[str, Any]:
+    """Analyze content with Gemini while bounding concurrency, queue wait, and repeat spend."""
+    if not api_key:
+        logger.info("Skipping LLM analysis: no server-side API key configured.")
         return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
+
+    cache_key = stable_key(
+        "llm",
+        f"{input_type}|{content}|{heuristic_score}|{json.dumps(heuristic_signals, sort_keys=True)}",
+    )
+    # Fast cache lookup before acquiring concurrency slot
+    cached = await llm_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Bound provider queue wait
+    try:
+        await asyncio.wait_for(llm_semaphore.acquire(), timeout=acquire_timeout_seconds)
+    except asyncio.TimeoutError:
+        logger.warning("provider=gemini event=queue_timeout")
+        return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
+
+    try:
+        # Check cache again inside lock in case a concurrent task already populated it
+        cached = await llm_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # Execute provider call with independent timeout
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                _execute_gemini_call,
+                input_type,
+                content,
+                api_key,
+                heuristic_score,
+                heuristic_signals,
+            ),
+            timeout=request_timeout_seconds,
+        )
+        await llm_cache.set(cache_key, result)
+        return result
+    except asyncio.TimeoutError:
+        logger.warning("provider=gemini event=request_timeout")
+    except APIError as e:
+        logger.warning("provider=gemini event=request_failed status=%s", getattr(e, "code", "unknown"))
+    except Exception:
+        logger.error("provider=gemini event=unexpected_error")
+    finally:
+        llm_semaphore.release()
+
+    return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)

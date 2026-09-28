@@ -2,6 +2,7 @@ import uuid
 import hashlib
 import asyncio
 import secrets
+import inspect
 import re
 import logging
 from typing import List, Dict, Any, Optional
@@ -35,6 +36,7 @@ from app.auth import (
     verify_password,
     get_current_user,
     get_optional_current_user,
+    get_user_id_from_session,
     require_admin,
     create_user_session,
     revoke_session,
@@ -54,6 +56,7 @@ from app.services.provider_guard import (
     urlhaus_semaphore,
     stable_key,
     run_bounded,
+    ProviderQueueExhaustedError,
 )
 
 from datetime import datetime, timezone
@@ -96,6 +99,53 @@ def security_rate_limit_key(request: Request) -> str:
             f"{client_ip}|{session}".encode("utf-8")
         ).hexdigest()
     return "ip:" + client_ip
+
+
+def security_daily_analysis_quota_key(request: Request) -> str:
+    """
+    Stable account-level rate limit key for the daily expensive-analysis quota.
+    - Authenticated: derived from stable db user_id (analysis-user:<sha256(user_id)>),
+      resolved once during request pipeline onto request.state.
+    - Anonymous: derived from client IP (ip:<client_ip>), matching the anonymous burst limiter.
+      Guest cookie rotation cannot reset this bucket.
+    """
+    # 1. Fast path: Read pre-resolved quota identity from request.state (0 DB calls in limiter)
+    precomputed = getattr(request.state, "analysis_quota_key", None)
+    if precomputed:
+        return precomputed
+
+    # 2. Fallback for direct invocations / standalone tests without ASGI middleware pipeline
+    session_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if session_token:
+        user_id = None
+        try:
+            db_factory = app.dependency_overrides.get(get_db, get_db)
+            gen = db_factory()
+            if inspect.isgenerator(gen):
+                try:
+                    db = next(gen)
+                    user_id = get_user_id_from_session(session_token, db)
+                finally:
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+            elif hasattr(gen, "__enter__"):
+                with gen as db:
+                    user_id = get_user_id_from_session(session_token, db)
+            else:
+                user_id = get_user_id_from_session(session_token, gen)
+                if hasattr(gen, "close"):
+                    gen.close()
+        except Exception as e:
+            logger.warning("Failed resolving user for daily quota key: %s", e)
+
+        if user_id:
+            user_hash = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()
+            return f"analysis-user:{user_hash}"
+
+    client_ip = get_remote_address(request)
+    return f"ip:{client_ip}"
 
 limiter = Limiter(
     key_func=security_rate_limit_key,
@@ -204,6 +254,43 @@ def _set_auth_cookies(response: Response, session_token: str) -> None:
 def _clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(settings.AUTH_COOKIE_NAME, path="/")
     response.delete_cookie(settings.CSRF_COOKIE_NAME, path="/")
+
+@app.middleware("http")
+async def auth_context_middleware(request: Request, call_next):
+    """
+    Resolves session authentication once per request lifecycle, precomputing the stable
+    account quota identity on request.state before route handlers or SlowAPI rate limiting run.
+    """
+    session_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if session_token:
+        try:
+            db_factory = app.dependency_overrides.get(get_db, get_db)
+            gen = db_factory()
+            if inspect.isgenerator(gen):
+                try:
+                    db = next(gen)
+                    user_id = get_user_id_from_session(session_token, db)
+                finally:
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+            elif hasattr(gen, "__enter__"):
+                with gen as db:
+                    user_id = get_user_id_from_session(session_token, db)
+            else:
+                user_id = get_user_id_from_session(session_token, gen)
+                if hasattr(gen, "close"):
+                    gen.close()
+
+            if user_id:
+                request.state.auth_user_id = user_id
+                user_hash = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()
+                request.state.analysis_quota_key = f"analysis-user:{user_hash}"
+        except Exception as e:
+            logger.warning("auth_context_middleware session lookup error: %s", e)
+
+    return await call_next(request)
 
 @app.middleware("http")
 async def csrf_protection(request: Request, call_next):
@@ -469,8 +556,8 @@ def get_all_scans_admin(
 
 # ================= CORE THREAT SCANNER ENDPOINT =================
 @app.post("/api/analyze", response_model=AnalysisResponse)
-@limiter.limit("100/day")
-@limiter.limit("10/minute")
+@limiter.limit("100/day", key_func=security_daily_analysis_quota_key)
+@limiter.limit("10/minute", key_func=security_rate_limit_key)
 async def analyze_input(
     request: Request,
     response: Response,
@@ -500,8 +587,8 @@ async def analyze_input(
         heuristic_signals = res["signals"]
         technical_details = res["details"]
 
-    except Exception as e:
-        logger.error(f"Heuristic engine execution error: {str(e)}")
+    except Exception:
+        logger.error("Heuristic engine execution error.")
         raise HTTPException(
             status_code=500,
             detail="An error occurred while analyzing the threat vectors."
@@ -526,15 +613,25 @@ async def analyze_input(
             vt_cache_key = stable_key("virustotal", content.strip())
             vt_data = await virustotal_cache.get(vt_cache_key)
             if vt_data is None:
-                vt_data = await run_bounded(analyze_url_with_virustotal(content, settings.VIRUSTOTAL_API_KEY), virustotal_semaphore, 6.0)
+                vt_data = await run_bounded(
+                    analyze_url_with_virustotal(content, settings.VIRUSTOTAL_API_KEY),
+                    virustotal_semaphore,
+                    timeout_seconds=6.0,
+                    acquire_timeout_seconds=2.0,
+                )
                 await virustotal_cache.set(vt_cache_key, vt_data)
-            vt_status = vt_data.get("status")
+            vt_status = vt_data.get("status") if vt_data else "error"
             if vt_status == "success" and vt_data.get("malicious_count", 0) > 0:
                 boost = min(30, vt_data["malicious_count"] * 5)
                 heuristic_score = min(100, heuristic_score + boost)
+        except ProviderQueueExhaustedError:
+            logger.warning("provider=virustotal event=queue_exhausted")
+            vt_status = "provider_unavailable"
         except asyncio.TimeoutError:
+            logger.warning("provider=virustotal event=timeout")
             vt_status = "timeout"
         except Exception:
+            logger.error("provider=virustotal event=unexpected_error")
             vt_status = "error"
 
         # URLhaus Integration
@@ -542,15 +639,25 @@ async def analyze_input(
             uh_cache_key = stable_key("urlhaus", content.strip())
             uh_data = await urlhaus_cache.get(uh_cache_key)
             if uh_data is None:
-                uh_data = await run_bounded(check_url_with_urlhaus(content), urlhaus_semaphore, 5.0)
+                uh_data = await run_bounded(
+                    check_url_with_urlhaus(content),
+                    urlhaus_semaphore,
+                    timeout_seconds=5.0,
+                    acquire_timeout_seconds=2.0,
+                )
                 await urlhaus_cache.set(uh_cache_key, uh_data)
-            uh_status = uh_data.get("status")
+            uh_status = uh_data.get("status") if uh_data else "error"
             if uh_status == "success" and uh_data.get("in_database"):
                 boost = 25
                 heuristic_score = min(100, heuristic_score + boost)
+        except ProviderQueueExhaustedError:
+            logger.warning("provider=urlhaus event=queue_exhausted")
+            uh_status = "provider_unavailable"
         except asyncio.TimeoutError:
+            logger.warning("provider=urlhaus event=timeout")
             uh_status = "timeout"
         except Exception:
+            logger.error("provider=urlhaus event=unexpected_error")
             uh_status = "error"
 
         # Update status classification after intel boosts
@@ -621,7 +728,23 @@ async def analyze_input(
 
     logger.info(f"[SCAN] user={user_id or 'anon'} type={input_type} score={final_score} status={final_status}")
 
-    # 6. Return Trimmed Response
+    # 6. Return Trimmed Response with Sanitized Contracts
+    vt_findings = {
+        "status": vt_data.get("status", "error"),
+        "malicious_count": int(vt_data.get("malicious_count", 0)),
+        "suspicious_count": int(vt_data.get("suspicious_count", 0)),
+        "reputation_score": int(vt_data.get("reputation_score", 50)),
+        "vendors": list(vt_data.get("vendors", [])),
+    } if (vt_status == "success" and vt_data) else None
+
+    uh_findings = {
+        "status": uh_data.get("status", "error"),
+        "in_database": bool(uh_data.get("in_database", False)),
+        "threat_type": uh_data.get("threat_type"),
+        "date_added": str(uh_data.get("date_added", "")),
+        "malware_families": list(uh_data.get("malware_families", [])),
+    } if (uh_status == "success" and uh_data) else None
+
     return AnalysisResponse(
         input_type=input_type,
         risk_score=final_score,
@@ -629,11 +752,11 @@ async def analyze_input(
         phishing_signals=final_signals,
         ai_explanation=ai_explanation,
         details=technical_details,
-        virustotal_findings=vt_data if vt_status == "success" else None,
+        virustotal_findings=vt_findings,
         vt_status=vt_status,
         vt_malicious_vendors=vt_data.get("malicious_count") if vt_status == "success" and vt_data else None,
         vt_reputation=vt_data.get("reputation_score") if vt_status == "success" and vt_data else None,
-        urlhaus_findings=uh_data if uh_status == "success" else None,
+        urlhaus_findings=uh_findings,
         urlhaus_status=uh_status,
         urlhaus_threat_type=uh_data.get("threat_type") if uh_status == "success" and uh_data else None,
         urlhaus_in_database=uh_data.get("in_database") if uh_status == "success" and uh_data else None,

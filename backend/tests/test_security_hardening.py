@@ -899,3 +899,421 @@ def test_session_creation_removes_only_dead_sessions_for_same_user(client):
     finally:
         db.close()
 
+
+def test_authenticated_daily_quota_persists_across_sessions(client, monkeypatch):
+    """
+    Test Deliverable A: A user gets the same daily analysis quota across multiple sessions
+    (session A -> scans -> logout/new login -> session B -> scans).
+    Session rotation must not reset the account-level daily quota bucket.
+    """
+    import time
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+
+    email = f"quota_user_{uuid.uuid4().hex[:6]}@example.com"
+    password = "SecurePassword123!"
+
+    # 1. Register user (creates initial session A)
+    reg_res = register(client, email, password)
+    assert reg_res.status_code == 200
+    session_a = client.cookies.get(settings.AUTH_COOKIE_NAME)
+    assert session_a
+
+    fake_now = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: fake_now[0])
+
+    headers = csrf_headers(client)
+
+    # 2. Consume 60 requests with Session A
+    for i in range(60):
+        res = client.post(
+            "/api/analyze",
+            json={"input_type": "email_text", "content": f"Message batch A {i}."},
+            headers=headers,
+        )
+        assert res.status_code == 200
+        fake_now[0] += 61  # advance past 10/min burst limit window
+
+    # 3. User logs in again to create Session B
+    login_res = login(client, email, password)
+    assert login_res.status_code == 200
+    session_b = client.cookies.get(settings.AUTH_COOKIE_NAME)
+    assert session_b
+    assert session_b != session_a
+    headers = csrf_headers(client)
+
+    # 4. Consume remaining 40 requests with Session B
+    for i in range(40):
+        res = client.post(
+            "/api/analyze",
+            json={"input_type": "email_text", "content": f"Message batch B {i}."},
+            headers=headers,
+        )
+        assert res.status_code == 200
+        fake_now[0] += 61
+
+    # 5. 101st request for this account under Session B must be blocked with 429
+    blocked = client.post(
+        "/api/analyze",
+        json={"input_type": "email_text", "content": "Request 101 must be blocked across sessions."},
+        headers=headers,
+    )
+    assert blocked.status_code == 429
+
+
+def test_security_daily_analysis_quota_key_behavior():
+    """
+    Verify security_daily_analysis_quota_key returns stable analysis-user:<hash> for authenticated users
+    and stable ip:<ip> for anonymous users regardless of guest cookie rotation.
+    """
+    from app.main import security_daily_analysis_quota_key
+    from app.auth import create_user_session
+    from app.models.domain import User
+
+    db = TestingSessionLocal()
+    try:
+        user = User(
+            id="test-stable-user-uuid-1234",
+            email=f"quota_key_user_{uuid.uuid4().hex[:6]}@example.com",
+            hashed_password=get_password_hash("password123"),
+            role="user",
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+
+        session_1 = create_user_session(user, db)
+        session_2 = create_user_session(user, db)
+        assert session_1 != session_2
+
+        req_sess_1 = _build_rate_limit_request(session=session_1)
+        req_sess_2 = _build_rate_limit_request(session=session_2)
+
+        key_1 = security_daily_analysis_quota_key(req_sess_1)
+        key_2 = security_daily_analysis_quota_key(req_sess_2)
+
+        # Keys for different sessions of same user must be identical
+        assert key_1 == key_2
+        assert key_1.startswith("analysis-user:")
+        # Raw session token and user ID should not appear verbatim if hashed
+        assert session_1 not in key_1
+        assert session_2 not in key_1
+
+        # Anonymous requests ignore guest cookies for quota
+        req_anon_1 = _build_rate_limit_request(guest="A" * 32)
+        req_anon_2 = _build_rate_limit_request(guest="B" * 32)
+        assert security_daily_analysis_quota_key(req_anon_1) == "ip:203.0.113.10"
+        assert security_daily_analysis_quota_key(req_anon_2) == "ip:203.0.113.10"
+    finally:
+        db.close()
+
+
+def test_gemini_interactions_explicit_no_storage_and_fallback(monkeypatch):
+    """
+    Test Deliverable B: Ensure Gemini requests explicitly pass store=False in interactions API
+    and verify compatibility fallback path.
+    """
+    import asyncio
+    from app.services.llm_service import analyze_with_llm, verify_gemini_key
+    from app.services.provider_guard import llm_cache
+
+    created_interactions = []
+
+    class MockInteractions:
+        def create(self, **kwargs):
+            created_interactions.append(kwargs)
+            class MockResult:
+                output_text = '{"risk_score": 85, "status": "danger", "phishing_signals": [], "ai_explanation": "Mocked threat analysis."}'
+            return MockResult()
+
+    class MockClientWithInteractions:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.interactions = MockInteractions()
+
+    # 1. Test primary interactions path with store=False
+    monkeypatch.setattr("google.genai.Client", MockClientWithInteractions)
+    llm_cache._items.clear()
+
+    res = asyncio.run(analyze_with_llm("url", "https://phish.example/login", "dummy-key", 20, []))
+    assert res["risk_score"] == 85
+    assert len(created_interactions) == 1
+    assert created_interactions[0].get("store") is False
+    assert created_interactions[0].get("model") == "models/gemini-3.6-flash"
+
+    # 2. Test verify_gemini_key uses store=False
+    created_interactions.clear()
+    verify_res = verify_gemini_key("dummy-key")
+    assert verify_res["valid"] is True
+    assert len(created_interactions) == 1
+    assert created_interactions[0].get("store") is False
+
+    # 3. Test compatibility fallback path (client without interactions)
+    generated_contents = []
+
+    class MockModels:
+        def generate_content(self, **kwargs):
+            generated_contents.append(kwargs)
+            class MockResponse:
+                text = '{"risk_score": 75, "status": "danger", "phishing_signals": [], "ai_explanation": "Fallback model analysis."}'
+            return MockResponse()
+
+    class MockClientWithoutInteractions:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.models = MockModels()
+
+    monkeypatch.setattr("google.genai.Client", MockClientWithoutInteractions)
+    llm_cache._items.clear()
+
+    fallback_res = asyncio.run(analyze_with_llm("url", "https://phish-fallback.example/login", "dummy-key", 10, []))
+    assert fallback_res["risk_score"] == 75
+    assert len(generated_contents) == 1
+    assert generated_contents[0]["config"].response_mime_type == "application/json"
+
+
+def test_embedded_url_resource_budget_enforcement():
+    """
+    Test Deliverable C: Bounded embedded URL extraction and analysis.
+    Tests 0, 1, 5, 25 (max), 26 (max+1), and 100 URLs.
+    """
+    from app.services.email_service import analyze_email_text
+
+    # 0 URLs
+    res_0 = analyze_email_text("Clean email without any hyperlinks.")
+    assert res_0["details"]["links_analyzed"] == 0
+    assert res_0["details"]["links_truncated"] is False
+    assert len(res_0["details"]["links_found"]) == 0
+
+    # 1 URL
+    res_1 = analyze_email_text("Click here: https://example.com/one")
+    assert res_1["details"]["links_analyzed"] == 1
+    assert res_1["details"]["links_truncated"] is False
+    assert res_1["details"]["links_found"] == ["https://example.com/one"]
+
+    # 5 URLs (normal)
+    body_5 = " ".join([f"https://example{i}.com/path" for i in range(5)])
+    res_5 = analyze_email_text(body_5)
+    assert res_5["details"]["links_analyzed"] == 5
+    assert res_5["details"]["links_truncated"] is False
+    assert len(res_5["details"]["links_found"]) == 5
+
+    # Exactly maximum (25 URLs)
+    body_25 = " ".join([f"https://example{i}.com/page" for i in range(25)])
+    res_25 = analyze_email_text(body_25, max_urls=25)
+    assert res_25["details"]["links_analyzed"] == 25
+    assert res_25["details"]["links_truncated"] is False
+    assert len(res_25["details"]["links_found"]) == 25
+
+    # Maximum + 1 (26 URLs) -> truncated to 25
+    body_26 = " ".join([f"https://example{i}.com/page" for i in range(26)])
+    res_26 = analyze_email_text(body_26, max_urls=25)
+    assert res_26["details"]["links_analyzed"] == 25
+    assert res_26["details"]["links_truncated"] is True
+    assert len(res_26["details"]["links_found"]) == 25
+
+    # Large set of URLs (100 URLs) -> truncated to 25
+    body_100 = " ".join([f"https://sub{i}.attack-domain.com/login" for i in range(100)])
+    res_100 = analyze_email_text(body_100, max_urls=25)
+    assert res_100["details"]["links_analyzed"] == 25
+    assert res_100["details"]["links_truncated"] is True
+    assert len(res_100["details"]["links_found"]) == 25
+
+
+def test_provider_queue_bounded_and_capacity_exhaustion():
+    """
+    Test Deliverable D: Requests waiting for provider capacity must have a bounded wait,
+    fail safely, and never invoke the provider after queue timeout.
+    """
+    import asyncio
+    from app.services.provider_guard import run_bounded, ProviderQueueExhaustedError
+    from app.services.llm_service import analyze_with_llm, llm_semaphore
+
+    test_semaphore = asyncio.Semaphore(1)
+    called = []
+
+    async def blocking_provider_work():
+        called.append("work_started")
+        await asyncio.sleep(0.2)
+        return {"status": "success"}
+
+    async def exercise_run_bounded():
+        # First task acquires the only semaphore slot
+        await test_semaphore.acquire()
+
+        # Second task attempts to run_bounded with small acquire_timeout
+        try:
+            with pytest.raises(ProviderQueueExhaustedError):
+                await run_bounded(
+                    blocking_provider_work,
+                    test_semaphore,
+                    timeout_seconds=1.0,
+                    acquire_timeout_seconds=0.02,
+                )
+        finally:
+            test_semaphore.release()
+
+        # Provider must NOT have been called for the timed-out request
+        assert len(called) == 0
+
+    asyncio.run(exercise_run_bounded())
+
+    # Exercise LLM queue timeout fallback
+    async def exercise_llm_queue_timeout():
+        # Exhaust llm_semaphore
+        slots = []
+        for _ in range(4):
+            await llm_semaphore.acquire()
+            slots.append(1)
+
+        try:
+            res = await analyze_with_llm(
+                "url",
+                "https://example-queue-exhausted.com",
+                "dummy-api-key",
+                15,
+                [],
+                acquire_timeout_seconds=0.02,
+            )
+            # Should safely fallback to heuristic analysis without raising
+            assert res["risk_score"] == 15
+            assert "AI Analysis Offline" in res["ai_explanation"]
+        finally:
+            for _ in slots:
+                llm_semaphore.release()
+
+    asyncio.run(exercise_llm_queue_timeout())
+
+
+def test_virustotal_and_urlhaus_result_sanitization():
+    """
+    Test Deliverable E: VirusTotal and URLhaus responses must strictly conform
+    to sanitized normalized contracts and not expose raw_response or internal fields.
+    """
+    import asyncio
+    from app.services.virustotal_service import analyze_url_with_virustotal
+    from app.services.urlhaus_service import check_url_with_urlhaus
+
+    class MockResp:
+        def __init__(self, status_code, json_data):
+            self.status = status_code
+            self._json = json_data
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def json(self, **kwargs):
+            return self._json
+
+    class MockSession:
+        def __init__(self, post_resp, get_resp=None):
+            self.post_resp = post_resp
+            self.get_resp = get_resp
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def post(self, *args, **kwargs):
+            return self.post_resp
+
+        def get(self, *args, **kwargs):
+            return self.get_resp
+
+    # 1. URLhaus with extra internal fields
+    urlhaus_mock_payload = {
+        "query_status": "ok",
+        "threat": "malware_download",
+        "date_added": "2026-09-28 12:00:00",
+        "urls": [{"threat": "malware_download", "tags": ["elf", "mirai"], "date_added": "2026-09-28"}],
+        "raw_response": "UNSANITIZED_INTERNAL_DUMP",
+        "internal_server_id": "srv-prod-99",
+    }
+    urlhaus_session = MockSession(MockResp(200, urlhaus_mock_payload))
+
+    import aiohttp
+    orig_session = aiohttp.ClientSession
+    aiohttp.ClientSession = lambda *args, **kwargs: urlhaus_session
+
+    try:
+        uh_result = asyncio.run(check_url_with_urlhaus("https://evil.example/payload"))
+        assert uh_result["status"] == "success"
+        assert uh_result["in_database"] is True
+        assert uh_result["threat_type"] == "malware_download"
+        assert uh_result["malware_families"] == ["elf", "mirai"]
+        assert "raw_response" not in uh_result
+        assert "internal_server_id" not in uh_result
+    finally:
+        aiohttp.ClientSession = orig_session
+
+    # 2. VirusTotal with extra internal fields
+    vt_post_payload = {"data": {"id": "scan-id-xyz-987"}}
+    vt_get_payload = {
+        "data": {
+            "attributes": {
+                "stats": {"malicious": 3, "suspicious": 1},
+                "results": {
+                    "VendorA": {"category": "malware"},
+                    "VendorB": {"category": "phishing"},
+                    "VendorC": {"category": "clean"},
+                },
+                "date": 1727500000,
+                "raw_backend_metadata": "LEAKED_VT_METADATA",
+            }
+        }
+    }
+    vt_session = MockSession(MockResp(200, vt_post_payload), MockResp(200, vt_get_payload))
+    aiohttp.ClientSession = lambda *args, **kwargs: vt_session
+
+    try:
+        vt_result = asyncio.run(analyze_url_with_virustotal("https://phishing.example/test", "valid-fake-key"))
+        assert vt_result["status"] == "success"
+        assert vt_result["malicious_count"] == 3
+        assert vt_result["suspicious_count"] == 1
+        assert vt_result["reputation_score"] == 100 - (3 * 10) - (1 * 3)
+        assert set(vt_result["vendors"]) == {"VendorA", "VendorB"}
+        assert "raw_response" not in vt_result
+        assert "raw_backend_metadata" not in vt_result
+        assert "vt_scan_id" not in vt_result
+    finally:
+        aiohttp.ClientSession = orig_session
+
+
+def test_provider_error_sanitization_masks_credentials_and_hostnames(client, monkeypatch):
+    """
+    Test Deliverable E & Logging: Exceptions containing credentials/hostnames
+    are sanitized and not exposed to the API consumer.
+    """
+    async def throwing_vt(url, api_key):
+        raise RuntimeError("Failed contacting https://internal-vault.corp.local:8443 with token secret_super_key_99999")
+
+    async def throwing_uh(url):
+        raise RuntimeError("Failed contacting https://internal-urlhaus-proxy.corp.local:9000 with creds admin:secret_pass_8888")
+
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", throwing_vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", throwing_uh)
+
+    client.get("/api/health")
+    headers = csrf_headers(client)
+
+    res = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": "https://example.com/test"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["vt_status"] in ("error", "provider_unavailable")
+    assert data["urlhaus_status"] in ("error", "provider_unavailable")
+
+    response_text = res.text
+    assert "secret_super_key_99999" not in response_text
+    assert "internal-vault.corp.local" not in response_text
+    assert "secret_pass_8888" not in response_text
+    assert "internal-urlhaus-proxy.corp.local" not in response_text

@@ -16,11 +16,8 @@ async def check_url_with_urlhaus(url: str) -> Dict[str, Any]:
     """
     Check a URL against the URLhaus malware/phishing database.
 
-    No API key required. Unlimited requests. 5s timeout.
-
-    Returns:
-        Dict with keys: status, url, in_database, threat_type,
-        date_added, malware_families, raw_response.
+    Returns normalized contract with keys:
+        status, in_database, threat_type, date_added, malware_families.
     """
     try:
         async with aiohttp.ClientSession() as session:
@@ -31,11 +28,9 @@ async def check_url_with_urlhaus(url: str) -> Dict[str, Any]:
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             ) as response:
                 if response.status != 200:
-                    logger.warning(f"URLhaus API error: {response.status}")
+                    logger.warning("provider=urlhaus event=api_error status=%s", response.status)
                     return {
                         "status": "error",
-                        "url": url,
-                        "code": response.status,
                         "in_database": False,
                         "threat_type": None,
                         "date_added": "",
@@ -46,9 +41,8 @@ async def check_url_with_urlhaus(url: str) -> Dict[str, Any]:
                 query_status = result.get("query_status")
 
                 if query_status == "no_results":
-                    result_data = {
+                    return {
                         "status": "success",
-                        "url": url,
                         "in_database": False,
                         "threat_type": None,
                         "date_added": "",
@@ -57,30 +51,26 @@ async def check_url_with_urlhaus(url: str) -> Dict[str, Any]:
 
                 elif query_status == "ok":
                     urls_data = result.get("urls", [])
-                    # Aggregate threat types and tags across all URL entries
                     threat_type = result.get("threat") or (urls_data[0].get("threat") if urls_data else "unknown")
                     tags: list = []
                     for entry in urls_data:
                         for tag in (entry.get("tags") or []):
                             if tag not in tags:
-                                tags.append(tag)
-                    date_added = result.get("date_added") or (urls_data[0].get("date_added") if urls_data else "")
+                                tags.append(str(tag))
+                    date_added = str(result.get("date_added") or (urls_data[0].get("date_added") if urls_data else ""))
 
                     return {
                         "status": "success",
-                        "url": url,
                         "in_database": True,
-                        "threat_type": threat_type or "unknown",
+                        "threat_type": str(threat_type) if threat_type else "unknown",
                         "date_added": date_added,
                         "malware_families": tags,
-                        "raw_response": result,
                     }
 
                 else:
+                    logger.warning("provider=urlhaus event=unexpected_query_status")
                     return {
                         "status": "error",
-                        "url": url,
-                        "message": f"Unexpected query_status: {query_status}",
                         "in_database": False,
                         "threat_type": None,
                         "date_added": "",
@@ -88,22 +78,18 @@ async def check_url_with_urlhaus(url: str) -> Dict[str, Any]:
                     }
 
     except asyncio.TimeoutError:
-        logger.warning(f"URLhaus timeout for URL: {url}")
+        logger.warning("provider=urlhaus event=timeout")
         return {
             "status": "timeout",
-            "url": url,
-            "message": "URLhaus request timed out",
             "in_database": False,
             "threat_type": None,
             "date_added": "",
             "malware_families": [],
         }
-    except Exception as e:
-        logger.error(f"URLhaus unexpected error: {str(e)}")
+    except Exception:
+        logger.error("provider=urlhaus event=unexpected_error")
         return {
             "status": "error",
-            "url": url,
-            "error": str(e),
             "in_database": False,
             "threat_type": None,
             "date_added": "",
