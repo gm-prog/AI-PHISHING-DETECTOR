@@ -88,6 +88,8 @@ class AnalysisResponse(BaseModel):
     webrisk_threat_types: Optional[List[str]] = Field(None)
     webrisk_in_database: Optional[bool] = Field(None)
 
+    local_feed_findings: Optional[Dict[str, Any]] = Field(None)
+
 class ScanHistoryItem(BaseModel):
     id: str
     user_id: Optional[str] = None

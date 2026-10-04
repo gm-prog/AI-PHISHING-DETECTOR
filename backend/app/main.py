@@ -48,6 +48,7 @@ from app.services.llm_service import analyze_with_llm
 from app.services.virustotal_service import analyze_url_with_virustotal
 from app.services.urlhaus_service import check_url_with_urlhaus
 from app.services.webrisk_service import check_url_with_webrisk
+from app.services.threat_feed_service import lookup_threat_indicator
 from app.services.provider_guard import (
     llm_cache,
     virustotal_cache,
@@ -664,7 +665,8 @@ async def analyze_input(
     elif heuristic_score >= 30:
         status_label = "warning"
 
-    # 3. External Threat Intelligence (URLs only)
+    # 3. External Threat Intelligence & Local Threat Feeds (URLs only)
+    local_feed_data: Optional[Dict[str, Any]] = None
     vt_data: Optional[Dict[str, Any]] = None
     uh_data: Optional[Dict[str, Any]] = None
     wr_data: Optional[Dict[str, Any]] = None
@@ -673,6 +675,23 @@ async def analyze_input(
     wr_status: Optional[str] = None
 
     if input_type == "url":
+        # Local Threat Feed Lookup (O(1) indexed lookup)
+        try:
+            local_feed_data = lookup_threat_indicator(db, "url", content.strip())
+            if local_feed_data and local_feed_data.get("is_match"):
+                heuristic_score = min(100, heuristic_score + 35)
+                sources_str = local_feed_data.get("sources_summary", "local_feed")
+                classification_str = local_feed_data.get("classification", "phishing")
+                observed_str = local_feed_data.get("observed_at", "")
+                heuristic_signals.append({
+                    "id": "threat_feed_match",
+                    "severity": "high",
+                    "title": f"Threat Intelligence Feed Match: {classification_str.upper()}",
+                    "description": f"Indicator flagged by synchronized threat intelligence feed (Source: {sources_str}, Classification: {classification_str}, Observed: {observed_str}).",
+                })
+        except Exception:
+            logger.error("provider=threat_feed event=lookup_error", exc_info=False)
+
         # VirusTotal Integration
         try:
             vt_cache_key = stable_key("virustotal", content.strip())
@@ -869,6 +888,7 @@ async def analyze_input(
         webrisk_status=wr_status,
         webrisk_threat_types=wr_data.get("threat_types") if wr_status == "success" and wr_data else None,
         webrisk_in_database=wr_data.get("in_database") if wr_status == "success" and wr_data else None,
+        local_feed_findings=local_feed_data,
     )
 
 

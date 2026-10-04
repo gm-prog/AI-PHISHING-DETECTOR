@@ -89,6 +89,7 @@ export interface AnalysisResponse {
   webrisk_status?: string;
   webrisk_threat_types?: string[];
   webrisk_in_database?: boolean;
+  local_feed_findings?: Record<string, any>;
 }
 
 export interface ScanHistoryItem {
