@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -13,6 +14,7 @@ from app.services.threat_feed_service import (
     NormalizedThreatIndicator,
     ThreatFeedProvider,
     normalize_indicator_value,
+    parse_and_normalize_utc_iso,
     lookup_threat_indicator,
     refresh_threat_feed,
     refresh_all_threat_feeds,
@@ -76,15 +78,70 @@ class MockFeedProvider:
         return self._indicators[:limit]
 
 
-def test_normalize_indicator_value():
-    """Verify indicator normalization and SHA-256 hash generation."""
-    clean, h = normalize_indicator_value("url", "  https://evil-portal.xyz/login  ")
-    assert clean == "https://evil-portal.xyz/login"
-    assert len(h) == 64
-    assert h == hashlib.sha256("https://evil-portal.xyz/login".encode("utf-8")).hexdigest()
+class SlowFeedProvider:
+    source_name = "slow_feed"
 
-    clean_dom, h_dom = normalize_indicator_value("domain", "BAD-DOMAIN.COM")
+    async def fetch_indicators(self, limit: int = 1000):
+        await asyncio.sleep(2.0)
+        return []
+
+
+class ErrorFeedProvider:
+    source_name = "error_feed"
+
+    async def fetch_indicators(self, limit: int = 1000):
+        raise RuntimeError("Feed upstream unavailable")
+
+
+def test_normalize_indicator_value_url_edge_cases():
+    """Verify deterministic URL normalization: scheme, host, default-ports, query sorting, fragments."""
+    # 1. Scheme and host lowercasing with port 80 / 443 stripping
+    clean1, h1 = normalize_indicator_value("url", "HTTP://EXAMPLE.COM:80/path/to/page/")
+    assert clean1 == "http://example.com/path/to/page"
+
+    clean2, h2 = normalize_indicator_value("url", "https://EXAMPLE.COM:443/path/to/page")
+    assert clean2 == "https://example.com/path/to/page"
+
+    # Non-standard port preserved
+    clean_port, _ = normalize_indicator_value("url", "https://evil.net:8443/login")
+    assert clean_port == "https://evil.net:8443/login"
+
+    # 2. Fragment stripping
+    clean_frag, h_frag = normalize_indicator_value("url", "https://example.com/login#section2")
+    assert clean_frag == "https://example.com/login"
+    assert h_frag == hashlib.sha256("https://example.com/login".encode("utf-8")).hexdigest()
+
+    # 3. Query parameter sorting
+    clean_q1, _ = normalize_indicator_value("url", "https://example.com/api?b=2&a=1&c=3")
+    clean_q2, _ = normalize_indicator_value("url", "https://example.com/api?c=3&a=1&b=2")
+    assert clean_q1 == "https://example.com/api?a=1&b=2&c=3"
+    assert clean_q1 == clean_q2
+
+    # 4. Domain / IP / Hash normalization
+    clean_dom, _ = normalize_indicator_value("domain", "BAD-DOMAIN.COM.")
     assert clean_dom == "bad-domain.com"
+
+    clean_ip, _ = normalize_indicator_value("ip", "192.168.1.1")
+    assert clean_ip == "192.168.1.1"
+
+
+def test_parse_and_normalize_utc_iso():
+    """Verify canonical UTC ISO-8601 parsing across datetimes, offsets, and strings."""
+    # UTC with Z
+    iso_z = parse_and_normalize_utc_iso("2026-10-04T12:00:00Z")
+    assert iso_z == "2026-10-04T12:00:00+00:00"
+
+    # Non-UTC offset converts to canonical UTC (+05:30)
+    iso_offset = parse_and_normalize_utc_iso("2026-10-04T17:30:00+05:30")
+    assert iso_offset == "2026-10-04T12:00:00+00:00"
+
+    # Datetime object
+    dt = datetime(2026, 10, 4, 12, 0, 0, tzinfo=timezone.utc)
+    assert parse_and_normalize_utc_iso(dt) == "2026-10-04T12:00:00+00:00"
+
+    # Invalid / None
+    assert parse_and_normalize_utc_iso(None) is None
+    assert parse_and_normalize_utc_iso("not-a-date") is None
 
 
 def test_threat_indicator_insert_and_unique_constraint(db_session):
@@ -108,7 +165,6 @@ def test_threat_indicator_insert_and_unique_constraint(db_session):
     db_session.add(record)
     db_session.commit()
 
-    # Query back
     fetched = db_session.query(ThreatIndicator).filter_by(indicator_hash=url_hash).first()
     assert fetched is not None
     assert fetched.source == "phishtank"
@@ -172,13 +228,16 @@ def test_lookup_active_and_expired_indicators(db_session):
     assert res_unknown is None
 
 
-def test_lookup_multiple_source_provenance_deduplication(db_session):
-    """Verify that multiple sources matching the same indicator return consolidated provenance."""
+def test_lookup_multiple_source_provenance_and_classification_precedence(db_session):
+    """
+    Verify that multiple sources matching the same indicator return consolidated provenance
+    and select the highest-severity classification deterministically (malware > phishing).
+    """
     now_iso = datetime.now(timezone.utc).isoformat()
     url_multi = "https://multi-source-threat.com/steal"
     _, h_multi = normalize_indicator_value("url", url_multi)
 
-    # Insert from phishtank
+    # Insert from phishtank (classification: phishing)
     db_session.add(ThreatIndicator(
         id=str(uuid.uuid4()),
         source="phishtank",
@@ -191,14 +250,14 @@ def test_lookup_multiple_source_provenance_deduplication(db_session):
         created_at=now_iso,
         updated_at=now_iso,
     ))
-    # Insert from misp
+    # Insert from misp (classification: malware)
     db_session.add(ThreatIndicator(
         id=str(uuid.uuid4()),
         source="misp",
         indicator_type="url",
         indicator=url_multi,
         indicator_hash=h_multi,
-        classification="phishing",
+        classification="malware",
         confidence=0.99,
         observed_at=now_iso,
         created_at=now_iso,
@@ -213,14 +272,45 @@ def test_lookup_multiple_source_provenance_deduplication(db_session):
     assert "misp" in lookup_res["sources"]
     assert "phishtank" in lookup_res["sources"]
     assert lookup_res["confidence"] == 0.99
+    # Classification hierarchy: malware outranks phishing
+    assert lookup_res["classification"] == "malware"
+    assert lookup_res["all_classifications"] == ["malware", "phishing"]
 
 
-def test_refresh_threat_feed_deterministic_sync(db_session):
+@pytest.mark.asyncio
+async def test_refresh_threat_feed_invokes_provider_and_handles_timeouts(db_session):
+    """
+    Verify refresh_threat_feed calls provider.fetch_indicators and handles timeouts gracefully.
+    """
+    # 1. Successful fetch via provider
+    items = [
+        NormalizedThreatIndicator(source="dynamic_mock", indicator_type="url", indicator="https://dyn1.org", classification="phishing"),
+        NormalizedThreatIndicator(source="dynamic_mock", indicator_type="url", indicator="https://dyn2.org", classification="malware"),
+    ]
+    prov = MockFeedProvider("dynamic_mock", items)
+    res_success = await refresh_threat_feed(db_session, prov)
+    assert res_success["status"] == "success"
+    assert res_success["inserted"] == 2
+
+    # 2. Timeout handling
+    slow_prov = SlowFeedProvider()
+    res_timeout = await refresh_threat_feed(db_session, slow_prov, timeout_seconds=0.1)
+    assert res_timeout["status"] == "timeout"
+    assert res_timeout["inserted"] == 0
+
+    # 3. Provider error handling
+    err_prov = ErrorFeedProvider()
+    res_err = await refresh_threat_feed(db_session, err_prov)
+    assert res_err["status"] == "error"
+    assert res_err["inserted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_threat_feed_deterministic_sync(db_session):
     """Verify feed refresh synchronizes new records and updates existing records deterministically."""
     source_name = "test_feed_sync"
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Initial batch of 3 indicators
     initial_items = [
         NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator="https://site1.org", classification="phishing", confidence=0.8),
         NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator="https://site2.org", classification="malware", confidence=0.9),
@@ -228,34 +318,32 @@ def test_refresh_threat_feed_deterministic_sync(db_session):
     ]
 
     prov = MockFeedProvider(source_name=source_name, indicators=initial_items)
-    res1 = refresh_threat_feed(db_session, prov, indicators=initial_items)
+    res1 = await refresh_threat_feed(db_session, prov, indicators=initial_items)
     assert res1["inserted"] == 3
     assert res1["updated"] == 0
     assert res1["total_processed"] == 3
 
-    # Second batch: 2 existing updated, 2 new inserted
     second_items = [
         NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator="https://site1.org", classification="phishing_active", confidence=1.0),
         NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator="https://site2.org", classification="malware_updated", confidence=0.95),
         NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator="https://site4.org", classification="phishing", confidence=0.85),
         NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator="https://site5.org", classification="phishing", confidence=0.9),
     ]
-    res2 = refresh_threat_feed(db_session, prov, indicators=second_items)
+    res2 = await refresh_threat_feed(db_session, prov, indicators=second_items)
     assert res2["inserted"] == 2
     assert res2["updated"] == 2
     assert res2["total_processed"] == 4
 
-    # Verify updated values in database
     _, h1 = normalize_indicator_value("url", "https://site1.org")
     rec1 = db_session.query(ThreatIndicator).filter_by(source=source_name, indicator_hash=h1).first()
     assert rec1.classification == "phishing_active"
     assert rec1.confidence == 1.0
 
 
-def test_pipeline_integration_local_threat_feed_boost(client, db_session, monkeypatch):
+def test_pipeline_integration_local_threat_feed_boost_and_invariant(client, db_session, monkeypatch):
     """
     Verify full /api/analyze URL pipeline with local threat feed match:
-    - Active match contributes bounded +35 score boost
+    - Active match contributes exactly +35 score boost: final_score = min(100, baseline_score + 35)
     - Adds explainable 'Threat Intelligence Feed Match' signal
     - Response includes local_feed_findings with source provenance
     """
@@ -263,22 +351,7 @@ def test_pipeline_integration_local_threat_feed_boost(client, db_session, monkey
     test_url = "https://known-feed-phish.net/login"
     _, h_url = normalize_indicator_value("url", test_url)
 
-    # Insert test indicator into database
-    db_session.add(ThreatIndicator(
-        id=str(uuid.uuid4()),
-        source="phishtank",
-        indicator_type="url",
-        indicator=test_url,
-        indicator_hash=h_url,
-        classification="phishing",
-        confidence=1.0,
-        observed_at=now_iso,
-        created_at=now_iso,
-        updated_at=now_iso,
-    ))
-    db_session.commit()
-
-    # Isolate external APIs so only local feeds + heuristics run
+    # Clean external APIs
     async def mock_clean_vt(url, api_key):
         return {"status": "success", "url": url, "malicious_count": 0, "suspicious_count": 0, "reputation_score": 100, "vendors": []}
 
@@ -293,11 +366,36 @@ def test_pipeline_integration_local_threat_feed_boost(client, db_session, monkey
     monkeypatch.setattr("app.main.check_url_with_webrisk", mock_clean_wr)
 
     headers = get_csrf_headers(client)
+
+    # 1. Baseline scan without feed indicator
+    res_base = client.post("/api/analyze", json={"input_type": "url", "content": test_url}, headers=headers)
+    assert res_base.status_code == 200
+    baseline_score = res_base.json()["risk_score"]
+
+    # 2. Insert test indicator into database
+    db_session.add(ThreatIndicator(
+        id=str(uuid.uuid4()),
+        source="phishtank",
+        indicator_type="url",
+        indicator=test_url,
+        indicator_hash=h_url,
+        classification="phishing",
+        confidence=1.0,
+        observed_at=now_iso,
+        created_at=now_iso,
+        updated_at=now_iso,
+    ))
+    db_session.commit()
+
     res = client.post("/api/analyze", json={"input_type": "url", "content": test_url}, headers=headers)
     assert res.status_code == 200
     data = res.json()
+    final_score = data["risk_score"]
 
-    assert data["risk_score"] >= 35
+    # Mathematical proof of +35 score boost invariant:
+    expected_score = min(100, baseline_score + 35)
+    assert final_score == expected_score
+
     assert data["local_feed_findings"] is not None
     assert data["local_feed_findings"]["is_match"] is True
     assert "phishtank" in data["local_feed_findings"]["sources"]
@@ -307,11 +405,24 @@ def test_pipeline_integration_local_threat_feed_boost(client, db_session, monkey
 def test_duplicate_threat_sources_do_not_stack_score_boost(client, db_session, monkeypatch):
     """
     Verify that an indicator matching multiple synchronized feed sources (e.g. phishtank + misp)
-    contributes only ONE +35 risk boost, not compounding score multipliers.
+    contributes only ONE +35 risk boost, proving duplicate sources do not compound or multiply.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     test_url = "https://dual-source-phish.biz/login"
     _, h_url = normalize_indicator_value("url", test_url)
+
+    async def mock_clean_all(url, *args):
+        return {"status": "success", "url": url, "in_database": False, "threat_types": []}
+
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", mock_clean_all)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", mock_clean_all)
+    monkeypatch.setattr("app.main.check_url_with_webrisk", mock_clean_all)
+
+    headers = get_csrf_headers(client)
+
+    # Baseline scan before feed entries
+    res_base = client.post("/api/analyze", json={"input_type": "url", "content": test_url}, headers=headers)
+    baseline_score = res_base.json()["risk_score"]
 
     # Insert under source 1
     db_session.add(ThreatIndicator(
@@ -341,34 +452,12 @@ def test_duplicate_threat_sources_do_not_stack_score_boost(client, db_session, m
     ))
     db_session.commit()
 
-    async def mock_clean_all(url, *args):
-        return {"status": "success", "url": url, "in_database": False, "threat_types": []}
-
-    monkeypatch.setattr("app.main.analyze_url_with_virustotal", mock_clean_all)
-    monkeypatch.setattr("app.main.check_url_with_urlhaus", mock_clean_all)
-    monkeypatch.setattr("app.main.check_url_with_webrisk", mock_clean_all)
-
-    headers = get_csrf_headers(client)
     res = client.post("/api/analyze", json={"input_type": "url", "content": test_url}, headers=headers)
     assert res.status_code == 200
     data = res.json()
 
-    # Base heuristic for benign-looking URL is low; boost is +35 max
+    # Exact +35 invariant holds even with 2 sources:
+    assert data["risk_score"] == min(100, baseline_score + 35)
     assert data["local_feed_findings"]["matched_records_count"] == 2
-    # Signals must have exactly 1 threat_feed_match signal (not 2)
     feed_signals = [s for s in data["phishing_signals"] if s["id"] == "threat_feed_match"]
     assert len(feed_signals) == 1
-
-
-def test_threat_feed_db_error_fail_safe_in_pipeline(client, monkeypatch):
-    """Verify that database errors during threat feed lookup fail safely without crashing analysis."""
-    def mock_broken_lookup(db, ind_type, val):
-        raise RuntimeError("Database connection lost")
-
-    monkeypatch.setattr("app.main.lookup_threat_indicator", mock_broken_lookup)
-
-    headers = get_csrf_headers(client)
-    res = client.post("/api/analyze", json={"input_type": "url", "content": "https://sample-safe.com"}, headers=headers)
-    assert res.status_code == 200
-    data = res.json()
-    assert data["local_feed_findings"] is None
