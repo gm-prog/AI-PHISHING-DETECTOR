@@ -30,6 +30,7 @@ class Settings:
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development").lower()
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     VIRUSTOTAL_API_KEY: str = os.getenv("VIRUSTOTAL_API_KEY", "")
+    GOOGLE_WEB_RISK_API_KEY: str = os.getenv("GOOGLE_WEB_RISK_API_KEY", "")
     ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", LOCAL_ORIGINS)
     LLM_MAX_INPUT_CHARS: int = int(os.getenv("LLM_MAX_INPUT_CHARS", "12000"))
     MAX_REQUEST_BODY_BYTES: int = int(os.getenv("MAX_REQUEST_BODY_BYTES", "65536"))

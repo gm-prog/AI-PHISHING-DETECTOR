@@ -7,7 +7,7 @@
 ---
 
 ## 1. Executive Summary
-A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, and all 47 backend tests (covering 45 security hardening specifications and 2 standalone API regression tests) executed with a 100% pass rate.
+A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, bounded Google Web Risk threat intelligence integration implemented, and all 60 backend tests (covering 45 security hardening specifications, 13 Web Risk integration/security specifications, and 2 standalone API regression tests) executed with a 100% pass rate.
 
 ---
 
@@ -18,7 +18,7 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 - **API Gateway Tier**: FastAPI + Uvicorn (Python 3.11+)
 - **Data Tier**: SQLite ORM (`phishing_detector.db`) + SQLAlchemy 2.0 with dynamic user scoping
 - **External AI Tier**: Google Gemini 3.6 Flash (`models/gemini-3.6-flash` via `google-genai` Interactions API)
-- **External Intelligence Tier**: VirusTotal API & URLhaus Threat Feed
+- **External Intelligence Tier**: VirusTotal API, URLhaus Threat Feed, and Google Web Risk Lookup API
 
 ### 2.2 STRIDE Analysis
 ### 2.3 Analysis Abuse & AI Gateway Controls (Gateway v1.2.1)
@@ -32,8 +32,8 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 - **Dynamic Prompt Boundary Integrity**: User inputs are treated as hostile untrusted data enclosed in dynamic, per-request high-entropy boundary tags (`<UNTRUSTED_INPUT boundary="...">`), preventing attackers from prematurely terminating boundaries with injected tags. Server-side baseline facts are isolated within `<TRUSTED_HEURISTICS boundary="...">`. The application enforces a strict heuristic score floor and server-derived status classification (defense-in-depth).
 - **Pydantic LLM Output Validation**: All provider outputs are strictly validated through `LlmPhishingAnalysisSchema` (0..100 score bounds, literal status and severity enums, bounded string lengths and signal counts) before consumption, with safe fallback on validation failures.
 - **Embedded URL Budget**: Email analysis bounds embedded URL processing to `MAX_EXTRACTED_URLS` (default: 25) before running heuristic or external intel checks, mitigating resource amplification.
-- **Bounded Provider Queue**: Concurrency slots for Gemini, VirusTotal, and URLhaus require acquiring semaphore permits within a bounded queue timeout (2.0s) before executing operations with independent hard timeouts.
-- **Sanitized Provider Contracts**: VirusTotal and URLhaus results are normalized into minimal public schemas; `raw_response`, internal headers, and raw exception messages are stripped.
+- **Bounded Provider Queue**: Concurrency slots for Gemini, VirusTotal, URLhaus, and Google Web Risk require acquiring semaphore permits within a bounded queue timeout (2.0s) before executing operations with independent hard timeouts (5.0s / 6.0s).
+- **Sanitized Provider Contracts**: VirusTotal, URLhaus, and Google Web Risk results are normalized into minimal public schemas; `raw_response`, internal headers, API keys, and raw exception messages are stripped.
 - Production configuration requires `redis://` or `rediss://` rate-limit storage so quota state is shared across instances.
 
 - **Spoofing**: Mitigated via opaque, server-side session authentication with HttpOnly cookies (`backend/app/auth.py`) and bcrypt password hashing.
@@ -64,14 +64,15 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 ============================= test session starts ==============================
 platform linux -- Python 3.11.2, pytest-9.1.1, pluggy-1.6.0
 rootdir: /home/user/AI-PHISHING-DETECTOR
-plugins: anyio-4.15.1, platformdirs-4.12.3
-collected 47 items
+plugins: anyio-4.15.1, platformdirs-4.12.3, asyncio-1.4.0
+collected 60 items
 
-backend/test_backend.py ..                                               [  4%]
-backend/tests/test_security_hardening.py ............................... [ 70%]
-..............................                                           [100%]
+backend/test_backend.py ..                                               [  3%]
+backend/tests/test_security_hardening.py ............................... [ 55%]
+...............                                                          [ 80%]
+backend/tests/test_webrisk.py .............                              [100%]
 
-============================== 47 passed in 12.67s =============================
+============================== 60 passed in 12.50s =============================
 ```
 
 ---
@@ -91,12 +92,12 @@ backend/tests/test_security_hardening.py ............................... [ 70%]
 | **9. Validate All Inputs** | Implemented | `backend/app/models/schemas.py` (Pydantic models) | VERIFIED (`test_input_validation`) |
 | **10. Block Unauth Routes** | Implemented | `backend/app/auth.py` (`get_current_user`) | VERIFIED |
 | **11. Test SQL Injections** | Implemented | `backend/app/db.py` (SQLAlchemy ORM) | VERIFIED (`test_sql_injection_defense`) |
-| **12. Remove Sensitive Logs** | Implemented | `backend/app/main.py` (`SensitiveLogFilter`) | VERIFIED (`test_log_redaction`) |
+| **12. Remove Sensitive Logs** | Implemented | `backend/app/main.py` (`SensitiveLogFilter`) | VERIFIED (`test_log_redaction`, `test_webrisk_log_redaction`) |
 | **13. Block Field Tampering** | Implemented | `backend/app/main.py` (`register` body handling) | VERIFIED (`test_parameter_tampering_prevention`) |
 | **14. Restrict Uploads** | Not Applicable | No direct file uploads enabled on Gateway | N/A |
-| **15. Secure Server Logic** | Implemented | `backend/app/services/llm_service.py` (Gemini 3.6 Flash) | VERIFIED |
-| **16. Trim API Responses** | Implemented | `backend/app/models/schemas.py` (`UserOut`) | VERIFIED |
+| **15. Secure Server Logic** | Implemented | `backend/app/services/llm_service.py`, `backend/app/services/webrisk_service.py` | VERIFIED |
+| **16. Trim API Responses** | Implemented | `backend/app/models/schemas.py` (`UserOut`, `AnalysisResponse`) | VERIFIED |
 | **17. Secure Auth Sessions** | Implemented | `backend/app/auth.py` (Opaque Session Cookies, bcrypt) | VERIFIED (`test_user_registration_and_login`) |
 | **18. Scan Dependencies** | Implemented | `npm audit` & `pip-audit` package verification | VERIFIED |
 | **19. Test Record Access** | Implemented | `backend/app/main.py` (`delete_history`) | VERIFIED (`test_scoped_history_bulk_clear`) |
-| **20. Attack Your Own App** | Implemented | `backend/tests/test_security_hardening.py` | VERIFIED (47/47 Passed) |
+| **20. Attack Your Own App** | Implemented | `backend/tests/test_security_hardening.py`, `backend/tests/test_webrisk.py` | VERIFIED (60/60 Passed) |

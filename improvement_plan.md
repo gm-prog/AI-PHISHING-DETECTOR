@@ -13,6 +13,7 @@
    - Graceful local heuristic fallback when AI services are offline or unconfigured.
 
 2. **External Threat Intelligence Integration**:
+   - Google Web Risk Lookup API integration with bounded semaphores, TTL caching, SHA-256 cache keys, normalized public schemas, and +30 deterministic score contribution cap.
    - VirusTotal URL submission/report retrieval with normalized, sanitized contracts.
    - URLhaus malware domain lookups with automated reputation scoring.
    - Bounded provider queue semaphores, TTL caching, and hard execution timeouts.
@@ -32,8 +33,9 @@
 ## 🚀 Active Roadmap & Future Enhancements
 
 ### Phase 1: Dynamic Threat Feeds & Rule Updates
+- [x] Bounded Google Web Risk Threat-Intelligence Provider (`webrisk_service.py`, schema, pipeline, UI).
 - [ ] Scheduled background feed updates for brand databases and high-risk TLD tracking.
-- [ ] Integration with additional threat feeds (e.g. Google Safe Browsing, PhishTank, MISP).
+- [ ] Integration with additional threat feeds (e.g. PhishTank, MISP).
 - [ ] Structured email authentication parsing via standardized MIME/auth libraries.
 
 ### Phase 2: Platform Observability & Telemetry

@@ -47,13 +47,16 @@ from app.services.email_service import analyze_email_text, analyze_email_headers
 from app.services.llm_service import analyze_with_llm
 from app.services.virustotal_service import analyze_url_with_virustotal
 from app.services.urlhaus_service import check_url_with_urlhaus
+from app.services.webrisk_service import check_url_with_webrisk
 from app.services.provider_guard import (
     llm_cache,
     virustotal_cache,
     urlhaus_cache,
+    webrisk_cache,
     llm_semaphore,
     virustotal_semaphore,
     urlhaus_semaphore,
+    webrisk_semaphore,
     stable_key,
     run_bounded,
     ProviderQueueExhaustedError,
@@ -664,8 +667,10 @@ async def analyze_input(
     # 3. External Threat Intelligence (URLs only)
     vt_data: Optional[Dict[str, Any]] = None
     uh_data: Optional[Dict[str, Any]] = None
+    wr_data: Optional[Dict[str, Any]] = None
     vt_status: Optional[str] = None
     uh_status: Optional[str] = None
+    wr_status: Optional[str] = None
 
     if input_type == "url":
         # VirusTotal Integration
@@ -719,6 +724,39 @@ async def analyze_input(
         except Exception:
             logger.error("provider=urlhaus event=unexpected_error")
             uh_status = "error"
+
+        # Google Web Risk Integration
+        try:
+            wr_cache_key = stable_key("webrisk", content.strip())
+            wr_data = await webrisk_cache.get(wr_cache_key)
+            if wr_data is None:
+                wr_data = await run_bounded(
+                    check_url_with_webrisk(content, settings.GOOGLE_WEB_RISK_API_KEY),
+                    webrisk_semaphore,
+                    timeout_seconds=5.0,
+                    acquire_timeout_seconds=2.0,
+                )
+                await webrisk_cache.set(wr_cache_key, wr_data)
+            wr_status = wr_data.get("status") if wr_data else "error"
+            if wr_status == "success" and wr_data.get("in_database"):
+                # Google Web Risk match -> +30 risk points (capped at +30 once)
+                heuristic_score = min(100, heuristic_score + 30)
+                threat_list = ", ".join(wr_data.get("threat_types", [])) or "THREAT_UNSPECIFIED"
+                heuristic_signals.append({
+                    "id": "webrisk_threat_match",
+                    "severity": "high",
+                    "title": f"Google Web Risk Flagged: {threat_list}",
+                    "description": f"Google Web Risk database classifies this resource as unsafe ({threat_list}).",
+                })
+        except ProviderQueueExhaustedError:
+            logger.warning("provider=webrisk event=queue_exhausted")
+            wr_status = "provider_unavailable"
+        except asyncio.TimeoutError:
+            logger.warning("provider=webrisk event=timeout")
+            wr_status = "timeout"
+        except Exception:
+            logger.error("provider=webrisk event=unexpected_error")
+            wr_status = "error"
 
         # Update status classification after intel boosts
         if heuristic_score >= 70:
@@ -805,6 +843,12 @@ async def analyze_input(
         "malware_families": list(uh_data.get("malware_families", [])),
     } if (uh_status == "success" and uh_data) else None
 
+    wr_findings = {
+        "status": wr_data.get("status", "error"),
+        "in_database": bool(wr_data.get("in_database", False)),
+        "threat_types": list(wr_data.get("threat_types", [])),
+    } if (wr_status == "success" and wr_data) else None
+
     return AnalysisResponse(
         input_type=input_type,
         risk_score=final_score,
@@ -820,6 +864,10 @@ async def analyze_input(
         urlhaus_status=uh_status,
         urlhaus_threat_type=uh_data.get("threat_type") if uh_status == "success" and uh_data else None,
         urlhaus_in_database=uh_data.get("in_database") if uh_status == "success" and uh_data else None,
+        webrisk_findings=wr_findings,
+        webrisk_status=wr_status,
+        webrisk_threat_types=wr_data.get("threat_types") if wr_status == "success" and wr_data else None,
+        webrisk_in_database=wr_data.get("in_database") if wr_status == "success" and wr_data else None,
     )
 
 

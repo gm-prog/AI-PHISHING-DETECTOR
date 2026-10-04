@@ -69,8 +69,17 @@ def isolate_external_threat_intel(monkeypatch):
             "malware_families": [],
         }
 
+    async def fake_webrisk(url, api_key):
+        return {
+            "status": "skipped",
+            "url": url,
+            "in_database": False,
+            "threat_types": [],
+        }
+
     monkeypatch.setattr("app.main.analyze_url_with_virustotal", fake_vt)
     monkeypatch.setattr("app.main.check_url_with_urlhaus", fake_urlhaus)
+    monkeypatch.setattr("app.main.check_url_with_webrisk", fake_webrisk)
 
 
 def csrf_headers(client):

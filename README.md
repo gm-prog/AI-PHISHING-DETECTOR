@@ -82,13 +82,16 @@ The frontend will be running at: `http://localhost:5173`
 
 ---
 
-## 🔑 Gemini AI Setup (Optional)
+## 🔑 Gemini AI & Threat Intelligence Setup (Optional)
 
-The detector works fully offline with its autonomous heuristic engine. To enable server-side AI-powered semantic threat analysis:
+The detector works fully offline with its autonomous heuristic engine. To enable server-side AI-powered semantic threat analysis and external threat feeds:
 
-1. Get an API key from [Google AI Studio](https://aistudio.google.com/)
-2. Set `GEMINI_API_KEY=your_key_here` in `backend/.env` (or environment variables).
-   - In production, keys are managed securely on the backend; the client never directly handles or exposes third-party provider keys.
+1. **Google Gemini AI**: Get an API key from [Google AI Studio](https://aistudio.google.com/) and set `GEMINI_API_KEY=your_key_here` in `backend/.env`.
+2. **Google Web Risk**: Get an API key from [Google Cloud Console](https://console.cloud.google.com/) (Web Risk API) and set `GOOGLE_WEB_RISK_API_KEY=your_key_here` in `backend/.env`.
+3. **VirusTotal**: Set `VIRUSTOTAL_API_KEY=your_key_here` in `backend/.env`.
+4. **URLhaus**: No API key required; automated bounded lookups are enabled by default for URL analysis.
+
+All keys are server-side only and never leaked to frontend clients or persisted in logs.
 
 ---
 

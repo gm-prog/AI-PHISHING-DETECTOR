@@ -83,6 +83,11 @@ class AnalysisResponse(BaseModel):
     urlhaus_threat_type: Optional[str] = Field(None)
     urlhaus_in_database: Optional[bool] = Field(None)
 
+    webrisk_findings: Optional[Dict[str, Any]] = Field(None)
+    webrisk_status: Optional[str] = Field(None)
+    webrisk_threat_types: Optional[List[str]] = Field(None)
+    webrisk_in_database: Optional[bool] = Field(None)
+
 class ScanHistoryItem(BaseModel):
     id: str
     user_id: Optional[str] = None

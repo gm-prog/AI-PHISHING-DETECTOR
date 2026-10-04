@@ -34,6 +34,9 @@ class TTLCache:
                 self._items.pop(next(iter(self._items)))
             self._items[key] = (now + self.ttl_seconds, value)
 
+    def clear(self) -> None:
+        self._items.clear()
+
 
 def stable_key(namespace: str, value: str) -> str:
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -43,11 +46,13 @@ def stable_key(namespace: str, value: str) -> str:
 llm_cache = TTLCache(max_entries=256, ttl_seconds=600)
 virustotal_cache = TTLCache(max_entries=512, ttl_seconds=600)
 urlhaus_cache = TTLCache(max_entries=512, ttl_seconds=600)
+webrisk_cache = TTLCache(max_entries=512, ttl_seconds=600)
 
 # Prevent an attacker from creating an unbounded burst of paid/limited provider calls.
 llm_semaphore = asyncio.Semaphore(4)
 virustotal_semaphore = asyncio.Semaphore(4)
 urlhaus_semaphore = asyncio.Semaphore(8)
+webrisk_semaphore = asyncio.Semaphore(4)
 
 
 class ProviderQueueExhaustedError(Exception):

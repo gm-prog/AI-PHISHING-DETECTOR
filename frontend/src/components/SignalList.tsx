@@ -145,9 +145,55 @@ export const SignalList: React.FC<SignalListProps> = ({ signals, analysisData })
 const ExternalIntelPanel: React.FC<{ analysisData?: AnalysisResponse }> = ({ analysisData }) => {
   const hasVT = analysisData?.vt_status === "success";
   const hasUH = analysisData?.urlhaus_status === "success";
+  const hasWR = analysisData?.webrisk_status === "success";
 
   return (
     <div className="space-y-3">
+      {/* Google Web Risk Panel */}
+      {hasWR && (
+        <div className={`rounded-xl border p-3.5 ${
+          analysisData?.webrisk_in_database
+            ? "border-red-500/30 bg-red-950/20"
+            : "border-emerald-500/20 bg-emerald-950/10"
+        }`}>
+          <div className="flex items-center gap-2 mb-2">
+            <ShieldAlert className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-[10px] font-mono font-bold text-emerald-300 uppercase tracking-widest">
+              Google Web Risk
+            </span>
+            <span className={`ml-auto text-[9px] px-2 py-0.5 rounded-full font-mono font-bold border ${
+              analysisData?.webrisk_in_database
+                ? "border-red-500/30 bg-red-500/10 text-red-400"
+                : "border-green-500/30 bg-green-500/10 text-green-400"
+            }`}>
+              {analysisData?.webrisk_in_database ? "THREAT DETECTED" : "CLEAN"}
+            </span>
+          </div>
+
+          {analysisData?.webrisk_in_database ? (
+            <div className="space-y-1.5 text-left">
+              <p className="text-xs text-red-300 font-semibold">
+                ⛔ Flagged by Google Web Risk unsafe resource database!
+              </p>
+              {analysisData.webrisk_threat_types && analysisData.webrisk_threat_types.length > 0 && (
+                <div className="space-y-1">
+                  <span className="text-[10px] text-amber-400 font-mono">Threat Categories:</span>
+                  <div className="flex flex-wrap gap-1.5 mt-0.5">
+                    {analysisData.webrisk_threat_types.map((type, idx) => (
+                      <span key={idx} className="text-[10px] text-red-400 bg-red-500/10 px-2 py-0.5 rounded font-mono">
+                        {type}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-green-300">✅ URL not listed in Google Web Risk unsafe resources</p>
+          )}
+        </div>
+      )}
+
       {/* VirusTotal Panel */}
       {hasVT && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-950/10 p-3.5">
