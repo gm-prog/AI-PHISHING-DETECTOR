@@ -22,6 +22,8 @@
 | `GET` | `/api/auth/me` | Authenticated | Scoped to active session | Cookie `sentinel_session` | User profile (`UserOut`) | Standard | Low |
 | `GET` | `/api/admin/metrics` | Admin RBAC (`role == 'admin'`) | Global Aggregation | Cookie `sentinel_session` | Platform threat metrics | Strict Admin | High |
 | `GET` | `/api/admin/scans` | Admin RBAC (`role == 'admin'`) | Global Scans | Cookie `sentinel_session`, Query `limit` | System-wide scan telemetry | Strict Admin | High |
+| `GET` | `/api/admin/threat-feeds` | Admin RBAC (`role == 'admin'`) | Global Feed States | Cookie `sentinel_session` | Sanitized feed sync status and freshness | Strict Admin | Medium |
+| `POST` | `/api/admin/threat-feeds/{source}/refresh` | Admin RBAC (`role == 'admin'`) | Feed Provider Ingestion | Cookie, `X-CSRF-Token`, Path Param `source` | Refresh metrics (records processed/inserted/updated) | 5 / min | High |
 | `POST` | `/api/analyze` | Public / Optional Auth | Scoped to user or guest hash | JSON Body (`AnalysisRequest`) | Detailed Threat Analysis Report | 10 / min (Burst) + 100 / day (Account Quota) | Medium |
 | `GET` | `/api/history` | Authenticated / Guest | User / Guest Scoped | Cookie `sentinel_session` / `sentinel_guest` | User scan history list (sanitized previews) | Standard | Low |
 | `GET` | `/api/history/{scan_id}` | Authenticated | Strict IDOR check (`scan.user_id == current_user.id` or admin) | Path Param `scan_id`, Cookie | Single scan threat report | Standard | Medium |

@@ -36,8 +36,11 @@
 - [x] Bounded Google Web Risk Threat-Intelligence Provider (`webrisk_service.py`, schema, pipeline, UI) with upstream-aware expiration and TTL=0 on expired records.
 - [x] Standards-aware email authentication parsing (RFC 8601, RFC 7601, RFC 7208, RFC 6376, RFC 7489, alignment via `email_auth_service.py`) with trusted authserv-id boundaries and zero raw header persistence.
 - [x] Normalized threat intelligence feed foundation (`ThreatIndicator`, indexed hash lookup, deduplication, URL normalization, UTC parsing, classification precedence, and invariant tests via `threat_feed_service.py`).
-- [ ] Scheduled background feed crawler updates for continuous brand database sync.
-- [ ] Production feed connectors for PhishTank and MISP.
+- [x] Production threat feed connector layer (streaming bounded PhishTank & OpenPhish connectors, configurable MISP adapter).
+- [x] Feed state lifecycle tracking (`ThreatFeedState`), freshness calculation, conditional HTTP caching (`ETag`, `Last-Modified`, 304 handling), and atomic refresh (staging -> commit, retaining healthy generations on failure).
+- [x] Multi-source threat intelligence evidence fusion (`ThreatEvidence`), deterministic severity precedence, and bounded single-boost invariants.
+- [x] Admin threat feed control plane (`GET /api/admin/threat-feeds`, `POST /api/admin/threat-feeds/{source}/refresh`) with CSRF, rate-limiting, and strict source allowlisting.
+- [ ] Automated scheduled background cron/worker feed crawler sync.
 
 ### Phase 2: Platform Observability & Telemetry
 - [ ] Granular metrics collection for provider latency, cache hit ratios, and queue saturation.

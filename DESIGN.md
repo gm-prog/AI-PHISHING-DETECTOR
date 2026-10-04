@@ -84,13 +84,36 @@
 
 ## 4. Threat Intelligence & Email Authentication Subsystem
 
-### 4.1 Bounded Threat Intelligence Architecture
+### 4.1 Threat Intelligence Ingestion & Evidence Fusion Architecture
+SENTINEL AI uses a decoupled, defense-in-depth threat intelligence pipeline:
+```text
+Provider Connectors (PhishTank, OpenPhish, MISP)
+       ↓
+Validation, Normalization (URLs, UTC timestamps) & Byte Limits (32MB)
+       ↓
+Atomic Refresh Lifecycle (Staging → Commit; Failures Preserve Previous Generation)
+       ↓
+Local Hash-Indexed Intelligence Storage (`ThreatIndicator`, SHA-256 indexed hash)
+       ↓
+Freshness & Health Tracking (`ThreatFeedState`: fresh, stale, expired, failed)
+       ↓
+Evidence Fusion Layer (`ThreatEvidence`: multi-source provenance, severity hierarchy)
+       ↓
+Explainable Risk Aggregation (Exact +35 invariant, zero duplicate stacking, 0-100 bounds)
+```
+
+**Architectural Rationale**:
+- **Provider Independence & Redundancy**: If upstream network connectivity drops or a feed returns HTTP 500/malformed payloads, the system fails safely without crashing and retains the existing healthy generation.
+- **Durable Provenance & Multi-Source Reconciliation**: When multiple feeds flag the same indicator (e.g. PhishTank, OpenPhish, and MISP), the fusion engine consolidates provenance into a single +35 risk boost, selecting the most severe classification (`malware` > `c2` > `credential_harvesting` > `phishing` > `scam`).
+- **Resource Bounds & Memory Safety**: Streaming download chunking with hard maximum byte thresholds (32MB) prevents decompression bombs or memory exhaustion.
+- **Fail-Safe Provider Semantics**: External provider timeouts and queue saturation are surfaced as inconclusive/unavailable evidence, never misinterpreted as clean verdicts.
+
 - **Web Risk Lookup Provider**: Queries `https://webrisk.googleapis.com/v1/uris:search` with server-side `GOOGLE_WEB_RISK_API_KEY`. Enforces strict URL scheme validation, 4-permit concurrency semaphore, 2.0s acquire timeout, 5.0s execution timeout, and SHA-256 hashed TTL caching with provider expiration hints where effective TTL is strictly bounded by remaining provider validity (`min(remaining_seconds, 600)`) and expired results (remaining <= 0) receive TTL=0. Matches contribute a capped +30 risk score.
-- **Dynamic Threat Feed Layer (`ThreatIndicator`)**: Normalized internal indicator database with indexed SHA-256 lookup hash, source provenance (`phishtank`, `misp`, etc.), expiration filtering, URL normalization (scheme/host lowercasing, default-port stripping, sorted query params, fragment removal), UTC normalization, and unique deduplication (`source, indicator_type, indicator_hash`). Deterministic multi-source classification selects the most severe threat (`malware` > `c2` > `credential_harvesting` > `phishing` > `scam`). Active feed matches contribute a bounded +35 score boost without duplicate source multiplier compounding.
+- **Dynamic Threat Feed Layer (`ThreatIndicator`, `ThreatFeedState`)**: Normalized internal indicator database with indexed SHA-256 lookup hash, source provenance (`phishtank`, `openphish`, `misp`), expiration filtering, URL normalization (scheme/host lowercasing, default-port stripping, sorted query params, fragment removal), UTC normalization, and unique deduplication (`source, indicator_type, indicator_hash`). Deterministic multi-source classification selects the most severe threat. Active feed matches contribute a bounded +35 score boost without duplicate source multiplier compounding.
 
 ### 4.2 Standards-Aware Email Authentication
-- **RFC-Compliant Parser (`email_auth_service.py`)**: Structured interpretation of `Authentication-Results` (RFC 8601 / RFC 7601), `Received-SPF` (RFC 7208), `DKIM-Signature` (RFC 6376), and DMARC (RFC 7489) with comments stripped and quoted property strings (`reason="dkim=fail"`) distinguished from method results.
-- **Trust Boundary & Authentication Precedence**: Configurable `TRUSTED_AUTHSERV_IDS` setting ensures only verified upstream gateways are marked trusted; untrusted headers are retained for diagnostic metadata without false verification.
-- **Domain Normalization & Strict Identifier Alignment**: Uses Public Suffix List via `tldextract` to compare registered root domains (`example.com`). DMARC SPF alignment strictly compares `MAIL FROM` (not `HELO`), and DKIM alignment strictly compares signing domain `d=` (not `i=`).
+- **RFC-Compliant Parser (`email_auth_service.py`)**: Structured interpretation of `Authentication-Results` (RFC 8601 / RFC 7601), `Received-SPF` (RFC 7208), `DKIM-Signature` (RFC 6376), and DMARC (RFC 7489) with comments stripped, multiple DKIM signatures preserved, and quoted property strings (`reason="dkim=fail"`) distinguished from method results.
+- **Trust Boundary & Authentication Precedence**: Configurable `TRUSTED_AUTHSERV_IDS` setting ensures only verified upstream gateways are marked trusted (`is_authserv_trusted=True`). Untrusted Authentication-Results claims are evaluated as diagnostic metadata and cannot trigger receiver-side cryptographic failure penalties.
+- **Strict Identifier Alignment & No False Fallbacks**: Uses Public Suffix List via `tldextract` to compare registered root domains (`example.com`). DMARC SPF alignment strictly compares authenticated `MAIL FROM` (not `HELO`, and never falling back to `Return-Path` for authenticated SPF proof), and DKIM alignment strictly compares signing domain `d=` (never deriving `d=` from `i=`).
 - **Privacy Boundary**: Zero raw email header blocks, raw From, Return-Path, or Subject strings are persisted in `ScanHistory.details` or returned in API responses; only normalized domain identities, authentication flags, and urgent subject triggers are stored.
 - **Explainable Scoring**: Unknown authentication status or missing unsigned DKIM headers are preserved as `none`/`unknown` and not treated as failures; verified failures produce explicit, high-confidence threat signals with deterministic score impacts.

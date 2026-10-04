@@ -902,7 +902,7 @@ async def refresh_threat_feed(
         try:
             db.commit()
         except Exception:
-            pass
+            logger.debug("event=threat_feed_state_rollback_failed", exc_info=False)
         duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
         return {
             "source": source_name,

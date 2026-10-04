@@ -99,6 +99,9 @@ The detector works fully offline with its autonomous heuristic engine. To enable
 2. **Google Web Risk**: Get an API key from [Google Cloud Console](https://console.cloud.google.com/) (Web Risk API) and set `GOOGLE_WEB_RISK_API_KEY=your_key_here` in `backend/.env`.
 3. **VirusTotal**: Set `VIRUSTOTAL_API_KEY=your_key_here` in `backend/.env`.
 4. **URLhaus**: No API key required; automated bounded lookups are enabled by default for URL analysis.
+5. **PhishTank Feed**: (Implemented connector) Set `PHISHTANK_API_KEY=your_key_here` in `backend/.env` (optional; feed works without key or with application key).
+6. **OpenPhish Feed**: (Implemented connector) Enabled by default via community feed (`https://openphish.com/feed.txt`).
+7. **MISP Threat Sharing**: (Configurable adapter) Set `MISP_SERVER_URL=https://misp.your-org.local` and `MISP_API_KEY=your_key_here` in `backend/.env` (disabled if unconfigured).
 
 All keys are server-side only and never leaked to frontend clients or persisted in logs.
 
@@ -120,6 +123,8 @@ All keys are server-side only and never leaked to frontend clients or persisted 
 | `DELETE` | `/api/history` | User / Guest Scoped | Bulk clear history for current session |
 | `GET` | `/api/admin/metrics` | Admin RBAC | Platform-wide aggregation metrics |
 | `GET` | `/api/admin/scans` | Admin RBAC | Global scan audit log |
+| `GET` | `/api/admin/threat-feeds` | Admin RBAC | Sanitized sync status and freshness of threat feeds |
+| `POST` | `/api/admin/threat-feeds/{source}/refresh` | Admin RBAC (5/min, CSRF) | Trigger manual atomic refresh for registered feed provider |
 
 ### Example: Analyze a URL
 
@@ -135,8 +140,8 @@ curl -X POST http://localhost:8000/api/analyze \
 ## 🧪 Running the Backend Test Suite
 
 ```bash
-cd backend
-pytest -q
+PYTHONPATH=backend pytest backend/tests
+```
 ```
 
 ---
