@@ -79,3 +79,16 @@
 - **Focus Rings**: `focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00F0FF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#080C14]`.
 - **Contrast**: Text contrast ratio >= 4.5:1 against surfaces.
 - **Motion**: Minimal transitions (150ms-250ms ease-out) for tab switches and scan progress updates. Respect `prefers-reduced-motion`.
+
+---
+
+## 4. Threat Intelligence & Email Authentication Subsystem
+
+### 4.1 Bounded Threat Intelligence Architecture
+- **Web Risk Lookup Provider**: Queries `https://webrisk.googleapis.com/v1/uris:search` with server-side `GOOGLE_WEB_RISK_API_KEY`. Enforces strict URL scheme validation, 4-permit concurrency semaphore, 2.0s acquire timeout, 5.0s execution timeout, and SHA-256 hashed TTL caching with provider expiration hints. Matches contribute a capped +30 risk score.
+- **Dynamic Threat Feed Layer (`ThreatIndicator`)**: Normalized internal indicator database with indexed SHA-256 lookup (`O(1)`), source provenance (`phishtank`, `misp`, etc.), expiration filtering, and unique deduplication (`source, indicator_type, indicator_hash`). Active feed matches contribute a bounded +35 score boost without source compounding.
+
+### 4.2 Standards-Aware Email Authentication
+- **RFC-Compliant Parser (`email_auth_service.py`)**: Structured interpretation of `Authentication-Results` (RFC 8601), `Received-SPF` (RFC 7208), `DKIM-Signature` (RFC 6376), and DMARC (RFC 7489).
+- **Domain Normalization & Identifier Alignment**: Uses Public Suffix List via `tldextract` to compare registered root domains (`example.com`) rather than naive substrings, accurately evaluating SPF, DKIM, and DMARC alignment.
+- **Explainable Scoring**: Unknown authentication status or missing unsigned DKIM headers are not treated as failures; failures produce explicit, high-confidence threat signals with deterministic score impacts.

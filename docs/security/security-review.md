@@ -7,7 +7,7 @@
 ---
 
 ## 1. Executive Summary
-A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, bounded Google Web Risk threat intelligence integration implemented, and all 60 backend tests (covering 45 security hardening specifications, 13 Web Risk integration/security specifications, and 2 standalone API regression tests) executed with a 100% pass rate.
+A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, standards-aware email authentication parsing (RFC 8601/7208/6376/7489) deployed, dynamic threat feed foundation with indexed O(1) deduplication integrated, and all 80 backend tests (covering 45 security hardening specifications, 15 Web Risk integration/security specifications, 10 email authentication specifications, 8 threat-feed specifications, and 2 standalone API regression tests) executed with a 100% pass rate.
 
 ---
 
@@ -16,9 +16,9 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 ### 2.1 Component Mapping
 - **Client Tier**: React 18 SPA + Vite + TypeScript (Browser)
 - **API Gateway Tier**: FastAPI + Uvicorn (Python 3.11+)
-- **Data Tier**: SQLite ORM (`phishing_detector.db`) + SQLAlchemy 2.0 with dynamic user scoping
+- **Data Tier**: SQLite ORM (`phishing_detector.db`) + SQLAlchemy 2.0 with dynamic user scoping and `ThreatIndicator` table
 - **External AI Tier**: Google Gemini 3.6 Flash (`models/gemini-3.6-flash` via `google-genai` Interactions API)
-- **External Intelligence Tier**: VirusTotal API, URLhaus Threat Feed, and Google Web Risk Lookup API
+- **External Intelligence Tier**: VirusTotal API, URLhaus Threat Feed, Google Web Risk Lookup API, and local synchronized threat feeds (PhishTank, MISP)
 
 ### 2.2 STRIDE Analysis
 ### 2.3 Analysis Abuse & AI Gateway Controls (Gateway v1.2.1)
@@ -65,14 +65,16 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 platform linux -- Python 3.11.2, pytest-9.1.1, pluggy-1.6.0
 rootdir: /home/user/AI-PHISHING-DETECTOR
 plugins: anyio-4.15.1, platformdirs-4.12.3, asyncio-1.4.0
-collected 60 items
+collected 80 items
 
-backend/test_backend.py ..                                               [  3%]
-backend/tests/test_security_hardening.py ............................... [ 55%]
-...............                                                          [ 80%]
-backend/tests/test_webrisk.py .............                              [100%]
+backend/test_backend.py ..                                               [  2%]
+backend/tests/test_security_hardening.py ............................... [ 41%]
+...............                                                          [ 60%]
+backend/tests/test_webrisk.py ...............                            [ 78%]
+backend/tests/test_email_auth.py ..........                              [ 91%]
+backend/tests/test_threat_feeds.py ........                              [100%]
 
-============================== 60 passed in 12.50s =============================
+============================== 80 passed in 12.27s =============================
 ```
 
 ---
@@ -95,9 +97,9 @@ backend/tests/test_webrisk.py .............                              [100%]
 | **12. Remove Sensitive Logs** | Implemented | `backend/app/main.py` (`SensitiveLogFilter`) | VERIFIED (`test_log_redaction`, `test_webrisk_log_redaction`) |
 | **13. Block Field Tampering** | Implemented | `backend/app/main.py` (`register` body handling) | VERIFIED (`test_parameter_tampering_prevention`) |
 | **14. Restrict Uploads** | Not Applicable | No direct file uploads enabled on Gateway | N/A |
-| **15. Secure Server Logic** | Implemented | `backend/app/services/llm_service.py`, `backend/app/services/webrisk_service.py` | VERIFIED |
+| **15. Secure Server Logic** | Implemented | `backend/app/services/llm_service.py`, `backend/app/services/webrisk_service.py`, `backend/app/services/email_auth_service.py` | VERIFIED |
 | **16. Trim API Responses** | Implemented | `backend/app/models/schemas.py` (`UserOut`, `AnalysisResponse`) | VERIFIED |
 | **17. Secure Auth Sessions** | Implemented | `backend/app/auth.py` (Opaque Session Cookies, bcrypt) | VERIFIED (`test_user_registration_and_login`) |
 | **18. Scan Dependencies** | Implemented | `npm audit` & `pip-audit` package verification | VERIFIED |
 | **19. Test Record Access** | Implemented | `backend/app/main.py` (`delete_history`) | VERIFIED (`test_scoped_history_bulk_clear`) |
-| **20. Attack Your Own App** | Implemented | `backend/tests/test_security_hardening.py`, `backend/tests/test_webrisk.py` | VERIFIED (60/60 Passed) |
+| **20. Attack Your Own App** | Implemented | `backend/tests/` (80 test specifications) | VERIFIED (80/80 Passed) |

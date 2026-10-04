@@ -6,7 +6,7 @@
 - **Database / ORM**: SQLite (`phishing_detector.db`) + SQLAlchemy 2.0 ORM
 - **Authentication**: Opaque Server-Side Sessions with HttpOnly/SameSite Cookies (`sentinel_session`), CSRF double-submit validation (`sentinel_csrf` cookie + `X-CSRF-Token` header), bcrypt password hashing
 - **External AI Tier**: Google Gemini 3.6 Flash (Interactions API with explicit `store=False`; Generate Content compatibility fallback is non-persistent by default)
-- **External Intel Tier**: VirusTotal API, URLhaus Threat Feeds, and Google Web Risk Lookup API (sanitized normalized contracts, bounded semaphores, TTL caching)
+- **External Intel Tier**: VirusTotal API, URLhaus Threat Feeds, Google Web Risk Lookup API, and local synchronized threat feeds (sanitized normalized contracts, bounded semaphores, TTL caching, O(1) indexed lookup)
 - **Persistence Boundary**: `ScanHistory` stores only a sanitized and bounded 100-character preview of user input; raw user payloads, prompts, LLM completions, and third-party API traces are never persisted or logged.
 
 ---

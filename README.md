@@ -22,22 +22,31 @@ An advanced full-stack AI-powered phishing detector that inspects URLs, email bo
 Ai phishing detector/
 ├── backend/                  # FastAPI Python backend
 │   ├── app/
-│   │   ├── main.py           # API routes and report generation
+│   │   ├── main.py           # API routes, rate limiting, and orchestration
 │   │   ├── config.py         # Environment configuration
 │   │   ├── models/
+│   │   │   ├── domain.py     # SQLAlchemy models (User, ScanHistory, ThreatIndicator)
 │   │   │   └── schemas.py    # Pydantic request/response models
 │   │   └── services/
-│   │       ├── url_service.py    # URL heuristic analyzer
-│   │       ├── email_service.py  # Email text + header analyzer
-│   │       └── llm_service.py    # Gemini AI integration
+│   │       ├── url_service.py         # URL heuristic analyzer
+│   │       ├── email_service.py       # Email text + header analyzer
+│   │       ├── email_auth_service.py  # Standards-aware SPF/DKIM/DMARC parser
+│   │       ├── webrisk_service.py     # Google Web Risk Lookup API provider
+│   │       ├── threat_feed_service.py # Normalized threat feed layer & lookup
+│   │       ├── provider_guard.py      # Provider concurrency & TTL caches
+│   │       └── llm_service.py         # Gemini AI integration
 │   ├── requirements.txt
 │   ├── .env                  # API key configuration
-│   └── test_backend.py       # Standalone backend test script
+│   └── tests/                # Test suite (80 passed specifications)
+│       ├── test_security_hardening.py # Gateway v1.2 security tests
+│       ├── test_webrisk.py            # Web Risk provider tests
+│       ├── test_email_auth.py         # Email auth parser tests
+│       └── test_threat_feeds.py       # Threat feed layer tests
 │
 └── frontend/                 # React + Vite + TypeScript frontend
     ├── src/
     │   ├── App.tsx            # Main application layout
-    │   ├── components/        # UI components
+    │   ├── components/        # UI components (SignalList, ThreatRadar, History)
     │   ├── types.ts           # TypeScript type definitions
     │   └── mockData.ts        # Quick-test sample payloads
     └── package.json
@@ -127,7 +136,7 @@ curl -X POST http://localhost:8000/api/analyze \
 
 ```bash
 cd backend
-pytest -q tests/test_security_hardening.py
+pytest -q
 ```
 
 ---

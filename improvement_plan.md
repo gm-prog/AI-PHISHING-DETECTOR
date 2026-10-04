@@ -34,9 +34,10 @@
 
 ### Phase 1: Dynamic Threat Feeds & Rule Updates
 - [x] Bounded Google Web Risk Threat-Intelligence Provider (`webrisk_service.py`, schema, pipeline, UI).
-- [ ] Scheduled background feed updates for brand databases and high-risk TLD tracking.
-- [ ] Integration with additional threat feeds (e.g. PhishTank, MISP).
-- [ ] Structured email authentication parsing via standardized MIME/auth libraries.
+- [x] Standards-aware email authentication parsing (RFC 8601, RFC 7208, RFC 6376, RFC 7489, alignment via `email_auth_service.py`).
+- [x] Normalized threat intelligence feed foundation (`ThreatIndicator`, indexed hash lookup, deduplication, provenance via `threat_feed_service.py`).
+- [ ] Scheduled background feed crawler updates for continuous brand database sync.
+- [ ] Production feed connectors for PhishTank and MISP.
 
 ### Phase 2: Platform Observability & Telemetry
 - [ ] Granular metrics collection for provider latency, cache hit ratios, and queue saturation.
