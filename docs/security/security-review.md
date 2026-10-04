@@ -68,16 +68,15 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 platform linux -- Python 3.11.2, pytest-9.1.1, pluggy-1.6.0
 rootdir: /home/user/AI-PHISHING-DETECTOR
 plugins: platformdirs-4.12.3, anyio-4.15.1, asyncio-1.4.0
-collected 95 items
+collected 100 items
 
-backend/test_backend.py ..                                               [  2%]
-backend/tests/test_email_auth.py ...................                     [ 22%]
-backend/tests/test_security_hardening.py ............................... [ 54%]
-..............                                                           [ 69%]
-backend/tests/test_threat_feeds.py .............                         [ 83%]
+backend/tests/test_email_auth.py ......................                  [ 22%]
+backend/tests/test_security_hardening.py ............................... [ 53%]
+..............                                                           [ 67%]
+backend/tests/test_threat_feeds.py .................                     [ 84%]
 backend/tests/test_webrisk.py ................                           [100%]
 
-======================== 95 passed, 3 warnings in 15.59s ========================
+======================= 100 passed, 3 warnings in 14.17s =======================
 ```
 
 ---
@@ -105,4 +104,4 @@ backend/tests/test_webrisk.py ................                           [100%]
 | **17. Secure Auth Sessions** | Implemented | `backend/app/auth.py` (Opaque Session Cookies, bcrypt) | VERIFIED (`test_user_registration_and_login`) |
 | **18. Scan Dependencies** | Implemented | `npm audit` & `pip-audit` package verification | VERIFIED |
 | **19. Test Record Access** | Implemented | `backend/app/main.py` (`delete_history`) | VERIFIED (`test_scoped_history_bulk_clear`) |
-| **20. Attack Your Own App** | Implemented | `backend/tests/` (95 test specifications) | VERIFIED (95/95 Passed) |
+| **20. Attack Your Own App** | Implemented | `backend/tests/` (100 test specifications) | VERIFIED (100/100 Passed) |
