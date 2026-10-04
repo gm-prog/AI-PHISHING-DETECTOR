@@ -63,12 +63,22 @@ def verify_schema_invariants(db_path: Optional[str] = None) -> None:
         # 2. Verify Alembic migration head revision
         cursor.execute("SELECT version_num FROM alembic_version")
         version_rows = cursor.fetchall()
-        if not version_rows or not version_rows[0][0]:
+        if len(version_rows) == 0:
             raise RuntimeError(
                 f"Database schema incompatible on {target_db}: 'alembic_version' table is empty. "
                 "Please run 'alembic upgrade head' before starting the application."
             )
+        if len(version_rows) != 1:
+            raise RuntimeError(
+                f"Database schema incompatible on {target_db}: expected exactly one Alembic migration revision in 'alembic_version', found {len(version_rows)}. "
+                "Please run 'alembic upgrade head' before starting the application."
+            )
         found_revision = version_rows[0][0]
+        if not found_revision:
+            raise RuntimeError(
+                f"Database schema incompatible on {target_db}: 'alembic_version' table is empty. "
+                "Please run 'alembic upgrade head' before starting the application."
+            )
         if found_revision != ALEMBIC_HEAD_REVISION:
             raise RuntimeError(
                 f"Database schema incompatible on {target_db}: database is at migration revision '{found_revision}', "
