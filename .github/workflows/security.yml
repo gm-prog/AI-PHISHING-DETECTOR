@@ -38,6 +38,52 @@ jobs:
       - name: Audit Python dependencies
         run: pip install pip-audit && pip-audit -r requirements.txt
 
+  backend-postgres:
+    name: Backend PostgreSQL integration (real postgres:16-alpine)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sentinel_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # CI-only throwaway credentials for the ephemeral service container.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/sentinel_ci
+      SENTINEL_TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/sentinel_ci
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Alembic migrations against PostgreSQL
+        run: alembic upgrade head
+
+      - name: Verify runtime schema invariants against PostgreSQL
+        run: |
+          python -c "from app.db import verify_schema_invariants; verify_schema_invariants(); print('PASS: schema invariants verified against PostgreSQL')"
+
+      - name: Run database tests and full backend regression suite (PostgreSQL enabled)
+        run: pytest -q
+
   frontend:
     name: Frontend build and dependency audit
     runs-on: ubuntu-latest

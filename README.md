@@ -94,6 +94,25 @@ The frontend will be running at: `http://localhost:5173`
 
 ---
 
+## 🚀 Production Deployment & Persistence
+
+| Environment | Database |
+|---|---|
+| development | SQLite (deterministic local fallback) |
+| test | SQLite (deterministic local fallback) |
+| production | PostgreSQL (explicit `DATABASE_URL`, fail closed) |
+
+Production **never** falls back to SQLite: startup fails closed when
+`DATABASE_URL` is missing, blank, SQLite-based, malformed, or uses an
+unsupported scheme. Schema changes are migration-driven only
+(`alembic upgrade head`, executed by Render's `preDeployCommand` before the
+app starts), and runtime startup performs strictly read-only schema
+invariant verification. See **[docs/deployment.md](docs/deployment.md)** for
+the full deployment contract (Render Blueprint, `$PORT`, health check,
+PostgreSQL provisioning, live verification).
+
+---
+
 ## 🔑 Gemini AI & Threat Intelligence Setup (Optional)
 
 The detector works fully offline with its autonomous heuristic engine. To enable server-side AI-powered semantic threat analysis and external threat feeds:

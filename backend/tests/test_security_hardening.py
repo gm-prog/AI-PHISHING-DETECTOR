@@ -472,6 +472,8 @@ def test_production_rate_limit_storage_requires_shared_backend():
     assert "RATE_LIMIT_STORAGE_URI must use Redis in production." in (result.stderr + result.stdout)
 
     env["RATE_LIMIT_STORAGE_URI"] = "rediss://redis.example.com:6379/0"
+    # Task 3.3: production also requires an explicit PostgreSQL DATABASE_URL.
+    env["DATABASE_URL"] = "postgresql://user:pass@db.internal:5432/sentinel"
     result = subprocess.run(
         [sys.executable, "-c", "import app.config"],
         cwd=os.path.dirname(os.path.dirname(__file__)),

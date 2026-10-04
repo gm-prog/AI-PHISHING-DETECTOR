@@ -1,21 +1,42 @@
+# SENTINEL AI — Render Blueprint (backend deployment contract)
+#
+# Persistence contract:
+#   - Production runs exclusively on PostgreSQL. The application fails closed
+#     at startup if DATABASE_URL is missing, blank, SQLite, or malformed.
+#   - DATABASE_URL is supplied externally by the infrastructure operator
+#     (e.g. from a Render PostgreSQL instance's connection string). It is
+#     deliberately NOT provisioned or hardcoded in this Blueprint: the
+#     repository defines the application contract; the operator provisions
+#     and owns the production database.
+#   - Schema creation/mutation is migration-driven only: Alembic runs in
+#     preDeployCommand, BEFORE the new application version starts. Runtime
+#     startup performs strictly read-only schema invariant verification.
+#
+# NOTE: preDeployCommand requires a paid instance type on Render, which is
+# why this service does not use the free plan.
 services:
   - type: web
     name: ai-phishing-detector-backend
-    env: python
-    region: oregon  # or closest to your location
-    plan: free
+    runtime: python
+    region: oregon
+    plan: starter
     buildCommand: "cd backend && pip install -r requirements.txt"
-    startCommand: "cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    preDeployCommand: "cd backend && alembic upgrade head"
+    startCommand: "cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /api/health
     envVars:
-      - key: VIRUSTOTAL_API_KEY
-        sync: false
       - key: PYTHON_VERSION
-        value: "3.11"
+        value: "3.11.9"
       - key: ENVIRONMENT
         value: "production"
+      # Externally supplied PostgreSQL connection string (never hardcoded).
+      - key: DATABASE_URL
+        sync: false
       - key: ALLOWED_ORIGINS
         sync: false
       - key: RATE_LIMIT_STORAGE_URI
+        sync: false
+      - key: VIRUSTOTAL_API_KEY
         sync: false
       - key: AUTH_COOKIE_SECURE
         value: "true"

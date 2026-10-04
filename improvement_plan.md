@@ -19,7 +19,7 @@
    - Bounded provider queue semaphores, TTL caching, and hard execution timeouts.
 
 3. **Backend Persistence & Data Isolation**:
-   - SQLite / SQLAlchemy 2.0 ORM with user and guest session isolation.
+   - SQLAlchemy 2.x ORM with user and guest session isolation; SQLite in development/test, PostgreSQL (psycopg2) in production with fail-closed `DATABASE_URL` validation (Task 3.3, see `docs/deployment.md`).
    - IDOR-protected scan history retrieval and deletion endpoints.
    - Preview sanitization for persisted `ScanHistory` records (masking tokens, credentials, API keys, card numbers).
 
@@ -41,6 +41,7 @@
 - [x] Multi-source threat intelligence evidence fusion (`ThreatEvidence`), deterministic severity precedence, and bounded single-boost invariants.
 - [x] Authoritative Alembic database migrations (`alembic upgrade head`, `alembic downgrade base`), legacy constraint replacement (`uq_source_gen_type_indicator`), `generation_id` NOT NULL enforcement, fail-closed unsafe downgrade refusal on cross-generation duplicates, bounded BZ2 decompression with EOF & trailing data rejection, and non-mutating startup validation.
 - [x] Admin threat feed control plane (`GET /api/admin/threat-feeds`, `POST /api/admin/threat-feeds/{source}/refresh`) with CSRF, rate-limiting, and strict source allowlisting.
+- [x] Production persistence & deployment contract (Task 3.3): fail-closed `DATABASE_URL` validation, legacy `postgres://` normalization pinned to psycopg2, dialect-aware engine pooling, SQLAlchemy-inspection read-only schema verification portable across SQLite/PostgreSQL, PostgreSQL-portable Alembic migrations, real `postgres:16-alpine` CI integration, Render pre-deploy migration + dynamic `$PORT` contract, and a cookie/CSRF-native live verification harness (`docs/deployment.md`).
 - [ ] Automated scheduled background cron/worker feed crawler sync.
 
 ### Phase 2: Platform Observability & Telemetry
