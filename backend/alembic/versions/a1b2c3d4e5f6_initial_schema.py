@@ -146,23 +146,6 @@ def downgrade() -> None:
     inspector = sa.inspect(conn)
     existing_tables = set(inspector.get_table_names())
 
-    for table_name in ["scan_history", "user_sessions", "users", "threat_indicators"]:
+    for table_name in ["threat_indicators", "scan_history", "user_sessions", "users"]:
         if table_name in existing_tables:
             op.drop_table(table_name)
-
-
-
-def downgrade() -> None:
-    """Drop initial tables."""
-    conn = op.get_bind()
-    inspector = sa.inspect(conn)
-    existing_tables = inspector.get_table_names()
-
-    if "threat_indicators" in existing_tables:
-        op.drop_table("threat_indicators")
-    if "scan_history" in existing_tables:
-        op.drop_table("scan_history")
-    if "user_sessions" in existing_tables:
-        op.drop_table("user_sessions")
-    if "users" in existing_tables:
-        op.drop_table("users")

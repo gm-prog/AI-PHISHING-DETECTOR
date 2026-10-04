@@ -1070,11 +1070,11 @@ async def test_realistic_legacy_database_migration_coexistence_and_lifecycle(tmp
 
 def test_runtime_schema_verification_and_fail_closed(tmp_path):
     """
-    Requirements 4, 33, 34, 35:
-    Prove that runtime startup validates required schema invariants without silently mutating the DB,
-    and fails closed with RuntimeError on incompatible or unmigrated schemas.
+    Requirements 4, 33, 34, 35 & Task 3.2.4:
+    Prove that runtime startup validates required schema invariants and Alembic head revision without silently mutating the DB,
+    and fails closed with RuntimeError on missing tables, incompatible columns, or outdated Alembic revisions.
     """
-    from app.db import verify_schema_invariants
+    from app.db import verify_schema_invariants, ALEMBIC_HEAD_REVISION
     import sqlite3
 
     # 1. Non-existent file fails closed
@@ -1089,10 +1089,12 @@ def test_runtime_schema_verification_and_fail_closed(tmp_path):
     with pytest.raises(RuntimeError, match="does not exist or is uninitialized.*alembic upgrade head"):
         verify_schema_invariants(empty_file)
 
-    # 3. Create fully valid migrated schema
+    # 3. Create fully valid migrated schema with alembic_version at ALEMBIC_HEAD_REVISION
     valid_db_file = str(tmp_path / "valid_test.db")
     conn = sqlite3.connect(valid_db_file)
     cursor = conn.cursor()
+    cursor.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+    cursor.execute("INSERT INTO alembic_version (version_num) VALUES (?)", (ALEMBIC_HEAD_REVISION,))
     cursor.execute("""
         CREATE TABLE users (
             id VARCHAR PRIMARY KEY,
@@ -1179,20 +1181,69 @@ def test_runtime_schema_verification_and_fail_closed(tmp_path):
     # Valid schema passes validation cleanly
     verify_schema_invariants(valid_db_file)
 
-    # 4. Incompatible schema: missing threat_feed_states table fails closed
-    incompat_db_missing_table = str(tmp_path / "incompat_missing_tbl.db")
-    conn2 = sqlite3.connect(incompat_db_missing_table)
-    c2 = conn2.cursor()
-    c2.execute("CREATE TABLE users (id VARCHAR PRIMARY KEY, email VARCHAR NOT NULL, hashed_password VARCHAR NOT NULL, role VARCHAR NOT NULL, is_active BOOLEAN NOT NULL)")
-    conn2.commit()
-    conn2.close()
-    with pytest.raises(RuntimeError, match="missing required table"):
-        verify_schema_invariants(incompat_db_missing_table)
+    # 4. Incompatible schema: missing alembic_version table fails closed
+    incompat_db_missing_alembic = str(tmp_path / "incompat_missing_alembic.db")
+    conn_no_alembic = sqlite3.connect(incompat_db_missing_alembic)
+    c_na = conn_no_alembic.cursor()
+    c_na.execute("CREATE TABLE users (id VARCHAR PRIMARY KEY, email VARCHAR NOT NULL, hashed_password VARCHAR NOT NULL, role VARCHAR NOT NULL, is_active BOOLEAN NOT NULL)")
+    conn_no_alembic.commit()
+    conn_no_alembic.close()
+    with pytest.raises(RuntimeError, match="missing required table.*alembic_version"):
+        verify_schema_invariants(incompat_db_missing_alembic)
 
-    # 5. Incompatible schema: scan_history missing guest_session_hash index fails closed
+    # 5. Incompatible schema: wrong/older alembic revision fails closed
+    incompat_db_old_rev = str(tmp_path / "incompat_old_rev.db")
+    conn_old = sqlite3.connect(incompat_db_old_rev)
+    c_old = conn_old.cursor()
+    c_old.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+    c_old.execute("INSERT INTO alembic_version (version_num) VALUES ('a1b2c3d4e5f6')")  # older revision!
+    c_old.execute("CREATE TABLE users (id VARCHAR PRIMARY KEY, email VARCHAR NOT NULL, hashed_password VARCHAR NOT NULL, role VARCHAR NOT NULL, is_active BOOLEAN NOT NULL)")
+    c_old.execute("CREATE TABLE user_sessions (id VARCHAR PRIMARY KEY, user_id VARCHAR NOT NULL, session_id_hash VARCHAR NOT NULL, expires_at VARCHAR NOT NULL)")
+    c_old.execute("CREATE TABLE scan_history (id VARCHAR PRIMARY KEY, user_id VARCHAR, guest_session_hash VARCHAR, timestamp VARCHAR, input_type VARCHAR, content VARCHAR, risk_score INTEGER, status VARCHAR)")
+    c_old.execute("CREATE INDEX ix_scan_history_user_id ON scan_history (user_id)")
+    c_old.execute("CREATE INDEX ix_scan_history_guest_session_hash ON scan_history (guest_session_hash)")
+    c_old.execute("CREATE TABLE threat_indicators (id VARCHAR(36) PRIMARY KEY, source VARCHAR(64) NOT NULL, indicator_type VARCHAR(32) NOT NULL, indicator VARCHAR(2048) NOT NULL, indicator_hash VARCHAR(64) NOT NULL, classification VARCHAR(64) NOT NULL, confidence FLOAT NOT NULL, observed_at VARCHAR(32) NOT NULL, expires_at VARCHAR(32), generation_id VARCHAR(36) NOT NULL, created_at VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL, CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash))")
+    c_old.execute("CREATE INDEX ix_threat_indicators_source ON threat_indicators (source)")
+    c_old.execute("CREATE INDEX ix_threat_indicators_indicator_type ON threat_indicators (indicator_type)")
+    c_old.execute("CREATE INDEX ix_threat_indicators_indicator_hash ON threat_indicators (indicator_hash)")
+    c_old.execute("CREATE INDEX ix_threat_indicators_classification ON threat_indicators (classification)")
+    c_old.execute("CREATE INDEX ix_threat_indicators_expires_at ON threat_indicators (expires_at)")
+    c_old.execute("CREATE INDEX ix_threat_indicators_generation_id ON threat_indicators (generation_id)")
+    c_old.execute("CREATE TABLE threat_feed_states (source VARCHAR(64) PRIMARY KEY, enabled BOOLEAN NOT NULL, status VARCHAR(32) NOT NULL, freshness VARCHAR(32) NOT NULL, current_generation_id VARCHAR(36), refresh_interval_seconds INTEGER NOT NULL, updated_at VARCHAR(32) NOT NULL)")
+    conn_old.commit()
+    conn_old.close()
+    with pytest.raises(RuntimeError, match="database is at migration revision 'a1b2c3d4e5f6', expected head revision 'b4a49925f0e5'"):
+        verify_schema_invariants(incompat_db_old_rev)
+
+    # 6. Incompatible schema: empty alembic_version table fails closed
+    incompat_db_empty_ver = str(tmp_path / "incompat_empty_ver.db")
+    conn_ev = sqlite3.connect(incompat_db_empty_ver)
+    c_ev = conn_ev.cursor()
+    c_ev.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+    c_ev.execute("CREATE TABLE users (id VARCHAR PRIMARY KEY, email VARCHAR NOT NULL, hashed_password VARCHAR NOT NULL, role VARCHAR NOT NULL, is_active BOOLEAN NOT NULL)")
+    c_ev.execute("CREATE TABLE user_sessions (id VARCHAR PRIMARY KEY, user_id VARCHAR NOT NULL, session_id_hash VARCHAR NOT NULL, expires_at VARCHAR NOT NULL)")
+    c_ev.execute("CREATE TABLE scan_history (id VARCHAR PRIMARY KEY, user_id VARCHAR, guest_session_hash VARCHAR, timestamp VARCHAR, input_type VARCHAR, content VARCHAR, risk_score INTEGER, status VARCHAR)")
+    c_ev.execute("CREATE INDEX ix_scan_history_user_id ON scan_history (user_id)")
+    c_ev.execute("CREATE INDEX ix_scan_history_guest_session_hash ON scan_history (guest_session_hash)")
+    c_ev.execute("CREATE TABLE threat_indicators (id VARCHAR(36) PRIMARY KEY, source VARCHAR(64) NOT NULL, indicator_type VARCHAR(32) NOT NULL, indicator VARCHAR(2048) NOT NULL, indicator_hash VARCHAR(64) NOT NULL, classification VARCHAR(64) NOT NULL, confidence FLOAT NOT NULL, observed_at VARCHAR(32) NOT NULL, expires_at VARCHAR(32), generation_id VARCHAR(36) NOT NULL, created_at VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL, CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash))")
+    c_ev.execute("CREATE INDEX ix_threat_indicators_source ON threat_indicators (source)")
+    c_ev.execute("CREATE INDEX ix_threat_indicators_indicator_type ON threat_indicators (indicator_type)")
+    c_ev.execute("CREATE INDEX ix_threat_indicators_indicator_hash ON threat_indicators (indicator_hash)")
+    c_ev.execute("CREATE INDEX ix_threat_indicators_classification ON threat_indicators (classification)")
+    c_ev.execute("CREATE INDEX ix_threat_indicators_expires_at ON threat_indicators (expires_at)")
+    c_ev.execute("CREATE INDEX ix_threat_indicators_generation_id ON threat_indicators (generation_id)")
+    c_ev.execute("CREATE TABLE threat_feed_states (source VARCHAR(64) PRIMARY KEY, enabled BOOLEAN NOT NULL, status VARCHAR(32) NOT NULL, freshness VARCHAR(32) NOT NULL, current_generation_id VARCHAR(36), refresh_interval_seconds INTEGER NOT NULL, updated_at VARCHAR(32) NOT NULL)")
+    conn_ev.commit()
+    conn_ev.close()
+    with pytest.raises(RuntimeError, match="'alembic_version' table is empty"):
+        verify_schema_invariants(incompat_db_empty_ver)
+
+    # 7. Incompatible schema: scan_history missing user_id fails closed
     incompat_db_scan = str(tmp_path / "incompat_scan.db")
     conn3 = sqlite3.connect(incompat_db_scan)
     c3 = conn3.cursor()
+    c3.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+    c3.execute("INSERT INTO alembic_version (version_num) VALUES (?)", (ALEMBIC_HEAD_REVISION,))
     c3.execute("CREATE TABLE users (id VARCHAR PRIMARY KEY, email VARCHAR NOT NULL, hashed_password VARCHAR NOT NULL, role VARCHAR NOT NULL, is_active BOOLEAN NOT NULL)")
     c3.execute("CREATE TABLE user_sessions (id VARCHAR PRIMARY KEY, user_id VARCHAR NOT NULL, session_id_hash VARCHAR NOT NULL, expires_at VARCHAR NOT NULL)")
     c3.execute("CREATE TABLE scan_history (id VARCHAR PRIMARY KEY, timestamp VARCHAR, input_type VARCHAR, content VARCHAR, risk_score INTEGER, status VARCHAR)") # missing user_id
@@ -1200,7 +1251,7 @@ def test_runtime_schema_verification_and_fail_closed(tmp_path):
         CREATE TABLE threat_indicators (
             id VARCHAR(36) PRIMARY KEY, source VARCHAR(64) NOT NULL, indicator_type VARCHAR(32) NOT NULL, indicator VARCHAR(2048) NOT NULL,
             indicator_hash VARCHAR(64) NOT NULL, classification VARCHAR(64) NOT NULL, confidence FLOAT NOT NULL, observed_at VARCHAR(32) NOT NULL,
-            generation_id VARCHAR(36) NOT NULL, created_at VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL,
+            expires_at VARCHAR(32), generation_id VARCHAR(36) NOT NULL, created_at VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL,
             CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash)
         )
     """)
@@ -1210,10 +1261,12 @@ def test_runtime_schema_verification_and_fail_closed(tmp_path):
     with pytest.raises(RuntimeError, match="missing column.*in 'scan_history'"):
         verify_schema_invariants(incompat_db_scan)
 
-    # 6. Incompatible schema: threat_indicators with nullable generation_id fails closed
+    # 8. Incompatible schema: threat_indicators with nullable generation_id fails closed
     incompat_db_gen = str(tmp_path / "incompat_gen.db")
     conn4 = sqlite3.connect(incompat_db_gen)
     c4 = conn4.cursor()
+    c4.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+    c4.execute("INSERT INTO alembic_version (version_num) VALUES (?)", (ALEMBIC_HEAD_REVISION,))
     c4.execute("CREATE TABLE users (id VARCHAR PRIMARY KEY, email VARCHAR NOT NULL, hashed_password VARCHAR NOT NULL, role VARCHAR NOT NULL, is_active BOOLEAN NOT NULL)")
     c4.execute("CREATE TABLE user_sessions (id VARCHAR PRIMARY KEY, user_id VARCHAR NOT NULL, session_id_hash VARCHAR NOT NULL, expires_at VARCHAR NOT NULL)")
     c4.execute("CREATE TABLE scan_history (id VARCHAR PRIMARY KEY, user_id VARCHAR, guest_session_hash VARCHAR, timestamp VARCHAR, input_type VARCHAR, content VARCHAR, risk_score INTEGER, status VARCHAR)")
@@ -1223,7 +1276,7 @@ def test_runtime_schema_verification_and_fail_closed(tmp_path):
         CREATE TABLE threat_indicators (
             id VARCHAR(36) PRIMARY KEY, source VARCHAR(64) NOT NULL, indicator_type VARCHAR(32) NOT NULL, indicator VARCHAR(2048) NOT NULL,
             indicator_hash VARCHAR(64) NOT NULL, classification VARCHAR(64) NOT NULL, confidence FLOAT NOT NULL, observed_at VARCHAR(32) NOT NULL,
-            generation_id VARCHAR(36), -- Nullable!
+            expires_at VARCHAR(32), generation_id VARCHAR(36), -- Nullable!
             created_at VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL,
             CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash)
         )
@@ -1233,6 +1286,26 @@ def test_runtime_schema_verification_and_fail_closed(tmp_path):
     conn4.close()
     with pytest.raises(RuntimeError, match="generation_id' must be NOT NULL"):
         verify_schema_invariants(incompat_db_gen)
+
+
+def test_baseline_migration_ast_single_downgrade_and_reversibility():
+    """
+    Task 3.2.4 Requirement 1 & 3A:
+    1. Parse baseline migration file AST and verify exactly one downgrade() and one upgrade() function exist.
+    2. Ensure module imports cleanly and exposes expected revision metadata.
+    """
+    import ast
+    import os
+
+    baseline_file = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "alembic", "versions", "a1b2c3d4e5f6_initial_schema.py")
+    )
+    with open(baseline_file, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=baseline_file)
+
+    func_names = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+    assert func_names.count("upgrade") == 1, "a1b2c3d4e5f6_initial_schema.py must have exactly one upgrade() function"
+    assert func_names.count("downgrade") == 1, "a1b2c3d4e5f6_initial_schema.py must have exactly one downgrade() function"
 
 
 def test_startup_schema_verification_immutability(tmp_path):

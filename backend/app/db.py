@@ -9,12 +9,15 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "phishing_detector.db")
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
+ALEMBIC_HEAD_REVISION = "b4a49925f0e5"
+
 REQUIRED_TABLES = {
     "users",
     "user_sessions",
     "scan_history",
     "threat_indicators",
     "threat_feed_states",
+    "alembic_version",
 }
 
 REQUIRED_THREAT_INDICATOR_INDEXES = {
@@ -29,7 +32,7 @@ REQUIRED_THREAT_INDICATOR_INDEXES = {
 
 def verify_schema_invariants(db_path: Optional[str] = None) -> None:
     """
-    Validates required schema invariants at application startup without mutating the database.
+    Validates required schema invariants and Alembic head revision at application startup without mutating the database.
     Strictly read-only: fails closed with a clear RuntimeError if tables, columns, constraints,
     or NOT NULL requirements are uninitialized or incompatible.
     Instructs the operator to execute 'alembic upgrade head'.
@@ -57,7 +60,23 @@ def verify_schema_invariants(db_path: Optional[str] = None) -> None:
                 "Please run 'alembic upgrade head' before starting the application."
             )
 
-        # 2. Verify 'users' table columns
+        # 2. Verify Alembic migration head revision
+        cursor.execute("SELECT version_num FROM alembic_version")
+        version_rows = cursor.fetchall()
+        if not version_rows or not version_rows[0][0]:
+            raise RuntimeError(
+                f"Database schema incompatible on {target_db}: 'alembic_version' table is empty. "
+                "Please run 'alembic upgrade head' before starting the application."
+            )
+        found_revision = version_rows[0][0]
+        if found_revision != ALEMBIC_HEAD_REVISION:
+            raise RuntimeError(
+                f"Database schema incompatible on {target_db}: database is at migration revision '{found_revision}', "
+                f"expected head revision '{ALEMBIC_HEAD_REVISION}'. "
+                "Please run 'alembic upgrade head' before starting the application."
+            )
+
+        # 3. Verify 'users' table columns
         cursor.execute("PRAGMA table_info(users)")
         user_cols = {row[1] for row in cursor.fetchall()}
         required_user_cols = {"id", "email", "hashed_password", "role", "is_active"}
