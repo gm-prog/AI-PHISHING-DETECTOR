@@ -84,28 +84,37 @@ The frontend will be running at: `http://localhost:5173`
 
 ## 🔑 Gemini AI Setup (Optional)
 
-The detector works fully offline with its heuristic engine. To enable AI-powered reports:
+The detector works fully offline with its autonomous heuristic engine. To enable server-side AI-powered semantic threat analysis:
 
-1. Get a free API key from [Google AI Studio](https://aistudio.google.com/)
-2. Either:
-   - Set `GEMINI_API_KEY=your_key_here` in `backend/.env`, OR
-   - Enter it in the app's **Settings** modal (gear icon in the top-right)
+1. Get an API key from [Google AI Studio](https://aistudio.google.com/)
+2. Set `GEMINI_API_KEY=your_key_here` in `backend/.env` (or environment variables).
+   - In production, keys are managed securely on the backend; the client never directly handles or exposes third-party provider keys.
 
 ---
 
 ## 📡 API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/health` | Backend health status |
-| `POST` | `/api/analyze` | Analyze a URL, email body, or headers |
-| `POST` | `/api/verify-key` | Validate a Gemini API key |
+| Method | Endpoint | Access Control | Description |
+|--------|----------|----------------|-------------|
+| `GET` | `/api/health` | Public | Backend health telemetry |
+| `POST` | `/api/auth/register` | Public (5/min) | Account registration with HttpOnly session |
+| `POST` | `/api/auth/login` | Public (5/min) | Authentication with HttpOnly session |
+| `POST` | `/api/auth/logout` | Public/Auth | Session revocation and cookie clearance |
+| `GET` | `/api/auth/me` | Authenticated | Profile of current authenticated user |
+| `POST` | `/api/analyze` | Public / Auth (10/min + 100/day) | Threat vector analysis (URL, email body, headers) |
+| `GET` | `/api/history` | User / Guest Scoped | Retrieve scoped scan history |
+| `GET` | `/api/history/{scan_id}` | Owner / Admin Scoped | Single scan threat report (IDOR protected) |
+| `DELETE` | `/api/history/{scan_id}` | Owner / Admin Scoped | Delete single scan record |
+| `DELETE` | `/api/history` | User / Guest Scoped | Bulk clear history for current session |
+| `GET` | `/api/admin/metrics` | Admin RBAC | Platform-wide aggregation metrics |
+| `GET` | `/api/admin/scans` | Admin RBAC | Global scan audit log |
 
 ### Example: Analyze a URL
 
 ```bash
 curl -X POST http://localhost:8000/api/analyze \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <token>" \
   -d '{"input_type": "url", "content": "http://paypa1-verification.xyz/login"}'
 ```
 
@@ -113,9 +122,9 @@ curl -X POST http://localhost:8000/api/analyze \
 
 ## 🧪 Running the Backend Test Suite
 
-```powershell
+```bash
 cd backend
-.\venv\Scripts\python.exe test_backend.py
+pytest -q tests/test_security_hardening.py
 ```
 
 ---

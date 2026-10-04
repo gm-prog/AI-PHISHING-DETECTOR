@@ -21,12 +21,16 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 - **External Intelligence Tier**: VirusTotal API & URLhaus Feed
 
 ### 2.2 STRIDE Analysis
-### 2.3 Analysis Abuse & AI Gateway Controls (Gateway v1)
+### 2.3 Analysis Abuse & AI Gateway Controls (Gateway v1.2)
 - `/api/analyze` enforces two independent fixed-window limits: **10 requests/minute** (burst protection) and **100 requests/day** (daily expensive-analysis quota).
-- **Stable Account Quota**: The daily quota is keyed to the stable database user ID (`analysis-user:<sha256(user_id)>`) for authenticated users, persisting across session renewals and re-logins.
+- **Stable Account Quota**: The daily quota is keyed to the stable database user ID (`analysis-user:<sha256(user_id)>`) for authenticated users, precomputed during the ASGI request lifecycle onto `request.state` to avoid redundant database lookups.
+- **Fail-Closed Quota Semantics**: If an authenticated session is invalid, expired, or unresolvable, the gateway fails closed (HTTP 401/500) rather than silently degrading to an anonymous IP bucket.
 - **Anonymous Quota**: Anonymous requests are keyed to client IP (`ip:<client_ip>`), preventing guest-cookie rotation bypass.
 - **Burst Isolation**: Authenticated burst limiter identity is a SHA-256 digest of client IP + opaque session token (`session:<hash>`).
-- **Gemini No-Storage Mode**: All Gemini requests explicitly specify `store=False` on the Interactions API (and `cached_content=None` on compatibility/generate_content fallback paths) to enforce non-persistence of user-submitted phishing artifacts. Raw prompts, raw LLM completions, and raw third-party API responses are excluded from logs and persistent storage. Application-level `ScanHistory` records retain only a truncated 100-character input preview for user dashboard presentation.
+- **Gemini No-Storage Mode**: The primary Interactions API explicitly specifies `store=False` on all analysis and key-verification requests to opt out of server-side data retention. The Generate Content compatibility fallback path is non-persistent by default in Google's API architecture. Raw prompts, raw completions, and raw third-party provider responses are excluded from logs and persistent storage.
+- **Sanitized History Preview**: Application-level `ScanHistory` records retain only a sanitized, bounded 100-character preview of user input (with passwords, bearer tokens, API keys, and card numbers masked) for dashboard display.
+- **Prompt Injection Defense & Untrusted Boundaries**: User inputs are strictly treated as hostile untrusted data enclosed in `<UNTRUSTED_INPUT>` delimiters, while server-side baseline facts are isolated within `<TRUSTED_HEURISTICS>`. The application enforces a strict heuristic score floor and server-derived status classification.
+- **Pydantic LLM Output Validation**: All provider outputs are strictly validated through `LlmPhishingAnalysisSchema` (0..100 score bounds, literal status and severity enums, bounded string lengths and signal counts) before consumption, with safe fallback on validation failures.
 - **Embedded URL Budget**: Email analysis bounds embedded URL processing to `MAX_EXTRACTED_URLS` (default: 25) before running heuristic or external intel checks, mitigating resource amplification.
 - **Bounded Provider Queue**: Concurrency slots for Gemini, VirusTotal, and URLhaus require acquiring semaphore permits within a bounded queue timeout (2.0s) before executing operations with independent hard timeouts.
 - **Sanitized Provider Contracts**: VirusTotal and URLhaus results are normalized into minimal public schemas; `raw_response`, internal headers, and raw exception messages are stripped.

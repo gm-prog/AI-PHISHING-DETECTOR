@@ -101,6 +101,46 @@ def security_rate_limit_key(request: Request) -> str:
     return "ip:" + client_ip
 
 
+_SECRET_PATTERNS = [
+    # Authorization header / Bearer token
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-\.]{15,}"), "Bearer [MASKED]"),
+    (re.compile(r"(?i)authorization:\s*[^\r\n]+"), "Authorization: [MASKED]"),
+    # Common password assignments
+    (re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*[^\s&;]+"), r"\1=[MASKED]"),
+    # Common token / API key assignments
+    (re.compile(r"(?i)(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret)\s*[:=]\s*[^\s&;]+"), r"\1=[MASKED]"),
+    # Google API Key pattern
+    (re.compile(r"AIzaSy[A-Za-z0-9_\-]{10,}"), "AIzaSy...[MASKED]"),
+    # JWT-like pattern (header.payload.signature)
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_\-]{10,}"), "[MASKED_JWT]"),
+    # Credit card / PAN-like sequences (13-19 digits with optional spaces/dashes)
+    (re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[MASKED_CARD]"),
+    # Generic credential assignment with long value (24+ characters)
+    (re.compile(r"(?i)(key|token|secret|session)[=:]\s*([a-zA-Z0-9_\-]{24,})"), r"\1=[MASKED]"),
+]
+
+
+def sanitize_history_preview(content: str, max_chars: int = 100) -> str:
+    """
+    Sanitizes user input for persistent ScanHistory preview storage.
+    Masks credentials, API keys, passwords, bearer tokens, and payment card numbers
+    while preserving benign contextual text for dashboard display, capped at max_chars.
+    """
+    if not content:
+        return ""
+
+    sanitized = content.strip()
+    for pattern, repl in _SECRET_PATTERNS:
+        sanitized = pattern.sub(repl, sanitized)
+
+    # Collapse multiple whitespaces/newlines for clean single-line preview
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+
+    if len(sanitized) > max_chars:
+        return sanitized[:max_chars] + "..."
+    return sanitized
+
+
 def security_daily_analysis_quota_key(request: Request) -> str:
     """
     Stable account-level rate limit key for the daily expensive-analysis quota.
@@ -113,6 +153,14 @@ def security_daily_analysis_quota_key(request: Request) -> str:
     precomputed = getattr(request.state, "analysis_quota_key", None)
     if precomputed:
         return precomputed
+
+    # If the request presented an authenticated session cookie but resolution failed,
+    # fail-closed to prevent silent downgrade to an IP quota bucket.
+    if getattr(request.state, "auth_resolution_error", None):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials or session expired.",
+        )
 
     # 2. Fallback for direct invocations / standalone tests without ASGI middleware pipeline
     session_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
@@ -137,12 +185,21 @@ def security_daily_analysis_quota_key(request: Request) -> str:
                 user_id = get_user_id_from_session(session_token, gen)
                 if hasattr(gen, "close"):
                     gen.close()
-        except Exception as e:
-            logger.warning("Failed resolving user for daily quota key: %s", e)
+        except Exception:
+            logger.warning("event=auth_context_resolution_failed")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Unable to resolve authenticated quota identity.",
+            )
 
         if user_id:
             user_hash = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()
             return f"analysis-user:{user_hash}"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials or session expired.",
+            )
 
     client_ip = get_remote_address(request)
     return f"ip:{client_ip}"
@@ -287,8 +344,11 @@ async def auth_context_middleware(request: Request, call_next):
                 request.state.auth_user_id = user_id
                 user_hash = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()
                 request.state.analysis_quota_key = f"analysis-user:{user_hash}"
-        except Exception as e:
-            logger.warning("auth_context_middleware session lookup error: %s", e)
+            else:
+                request.state.auth_resolution_error = "invalid_or_expired_session"
+        except Exception:
+            logger.warning("event=auth_context_resolution_failed")
+            request.state.auth_resolution_error = "db_resolution_error"
 
     return await call_next(request)
 
@@ -588,7 +648,7 @@ async def analyze_input(
         technical_details = res["details"]
 
     except Exception:
-        logger.error("Heuristic engine execution error.")
+        logger.error("event=heuristic_engine_execution_failed")
         raise HTTPException(
             status_code=500,
             detail="An error occurred while analyzing the threat vectors."
@@ -698,13 +758,13 @@ async def analyze_input(
             signals=heuristic_signals
         )
 
-    # 5. Persist to Database with User Scoping (RLS/Isolation)
+    # 5. Persist to Database with User Scoping (RLS/Isolation) and Sanitized History Preview
     user_id = current_user.id if current_user else None
     guest_session_hash = None
     if current_user is None:
         guest_token = _get_or_create_guest_token(request, response)
         guest_session_hash = _guest_session_hash(guest_token)
-    snippet = content[:100] + "..." if len(content) > 100 else content
+    snippet = sanitize_history_preview(content, max_chars=100)
 
     db_record = ScanHistory(
         id=str(uuid.uuid4()),
@@ -722,8 +782,8 @@ async def analyze_input(
     try:
         db.add(db_record)
         db.commit()
-    except Exception as e:
-        logger.error(f"Scan persistence error: {e}")
+    except Exception:
+        logger.error("event=scan_persistence_failed")
         db.rollback()
 
     logger.info(f"[SCAN] user={user_id or 'anon'} type={input_type} score={final_score} status={final_status}")
