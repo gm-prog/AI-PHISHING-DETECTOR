@@ -138,30 +138,30 @@ SENTINEL AI uses a decoupled, defense-in-depth threat intelligence pipeline with
 
 ```text
 Legacy Schema:
-  threat_indicators: UNIQUE(source, indicator_type, indicator_hash)
-  generation_id: NULL
+  threat_indicators: UNIQUE(source, indicator_type, indicator_hash), generation_id: NULL
 
-          ↓ Alembic Batch Migration (or startup compatibility check)
+          ↓ Alembic Batch Migration (alembic upgrade head)
 
 Migrated Schema:
   threat_indicators:
-    - generation_id: NOT NULL / backfilled to 'legacy-gen-<source>'
+    - generation_id: VARCHAR(36) NOT NULL / backfilled to 'legacy-gen-<source>'
     - UNIQUE constraint: uq_source_gen_type_indicator (source, generation_id, indicator_type, indicator_hash)
     - Legacy constraint uq_source_type_indicator: EXPLICITLY REMOVED
     - Full functional index coverage: (source, indicator_type, indicator_hash, classification, expires_at, generation_id)
   threat_feed_states:
-    - current_generation_id: 'legacy-gen-<source>'
+    - current_generation_id: 'legacy-gen-<source>' (or NULL before first synchronization)
     - freshness: 'stale'
     - status: 'idle'
     - last_success_at: NULL (truthful, non-fabricated state)
 ```
 
 **Architectural Guarantees**:
-1. **Authoritative Migration Role**: Alembic is canonical for database evolution. `ensure_schema_migrations()` in `app/db.py` serves as a runtime compatibility check that adheres strictly to the same final invariants without divergence.
-2. **Deterministic Legacy Backfill**: Legacy indicators with `generation_id IS NULL` receive `legacy-gen-<source>`, and corresponding `ThreatFeedState` records are created or reconciled with `freshness = "stale"`, `status = "idle"`, and `last_success_at = None`. This preserves searchable threat intelligence while truthfully indicating that a fresh synchronization has not yet occurred.
-3. **True Generation Coexistence**: By removing `uq_source_type_indicator` and enforcing `uq_source_gen_type_indicator`, an indicator can be safely staged in a new generation while the identical indicator remains active in the legacy generation. Upon atomic activation, the active generation pointer updates, and older unreferenced indicators are retired.
-4. **Bounded BZ2 Decompression & EOF Validation**: Streaming decompression enforces a 32MB compressed limit and 64MB decompressed limit in 64KB chunks. The decompressor's `eof` property is validated; truncated or malformed streams are rejected with sanitized error codes (`decompression_too_large`, `decompression_invalid`).
-5. **Fail-Closed Migration Safety**: Database migration operations execute inside explicit transactions and roll back on error, raising a `RuntimeError` to prevent application startup on corrupt or incomplete schemas.
+1. **Authoritative Migration Role**: Alembic is canonical for database evolution (`alembic upgrade head`). Application startup strictly verifies schema invariants (`verify_schema_invariants()`) and fails closed without performing runtime DDL mutations.
+2. **Deterministic Legacy Backfill & Non-Nullable Invariant**: Legacy indicators with `generation_id IS NULL` receive `legacy-gen-<source>`, and `generation_id` is enforced as `NOT NULL` across both ORM models and database schema constraints.
+3. **Truthful State Reconciliation**: `ThreatFeedState` records are reconciled with `freshness = "stale"`, `status = "idle"`, and `last_success_at = None`. While `ThreatFeedState.current_generation_id` may remain `NULL` before initial feed synchronization, `ThreatIndicator.generation_id` is strictly non-nullable.
+4. **True Generation Coexistence & Downgrade Safety**: Indicators can be staged into a new generation while identical indicators remain active in older generations. Alembic `downgrade()` detects cross-generation duplicate records and explicitly refuses destructive rollbacks, failing closed with an informative migration error without deleting data.
+5. **Bounded BZ2 Decompression, EOF & Trailing Byte Validation**: Streaming decompression enforces a 32MB compressed limit and 64MB decompressed limit in 64KB chunks. Streams must reach EOF and contain zero unexpected trailing data; truncated or malformed streams are rejected with sanitized error codes (`decompression_too_large`, `decompression_invalid`).
+6. **Concurrency & Multi-Instance Operational Contract**: Outbound provider crawls are guarded by `threat_feed_semaphore` (concurrency cap = 2) and process-local per-source mutex locks. Note: In multi-instance cluster deployments, an external distributed lock (e.g. Redis-based Redlock) is required to coordinate crawler execution across worker nodes.
 
 ### 4.2 Standards-Aware Email Authentication & Provenance Boundary
 

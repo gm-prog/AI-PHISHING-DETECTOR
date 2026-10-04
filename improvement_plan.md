@@ -39,6 +39,7 @@
 - [x] Production threat feed connector layer (streaming bounded PhishTank & OpenPhish connectors, configurable MISP adapter).
 - [x] Feed state lifecycle tracking (`ThreatFeedState`), freshness calculation, conditional HTTP caching (`ETag`, `Last-Modified`, 304 handling), and atomic refresh (staging -> commit, retaining healthy generations on failure).
 - [x] Multi-source threat intelligence evidence fusion (`ThreatEvidence`), deterministic severity precedence, and bounded single-boost invariants.
+- [x] Authoritative Alembic database migrations (`alembic upgrade head`, `alembic downgrade base`), legacy constraint replacement (`uq_source_gen_type_indicator`), `generation_id` NOT NULL enforcement, fail-closed unsafe downgrade refusal on cross-generation duplicates, bounded BZ2 decompression with EOF & trailing data rejection, and non-mutating startup validation.
 - [x] Admin threat feed control plane (`GET /api/admin/threat-feeds`, `POST /api/admin/threat-feeds/{source}/refresh`) with CSRF, rate-limiting, and strict source allowlisting.
 - [ ] Automated scheduled background cron/worker feed crawler sync.
 

@@ -8,8 +8,13 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "phishing_detector.db")
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
-# Auto-migrate schema for security-sensitive ownership fields and threat feed generation lifecycle.
-def ensure_schema_migrations(db_path: str = DB_PATH):
+# Authoritative database evolution is managed via Alembic.
+# Runtime startup strictly verifies schema compatibility and fails closed if unmigrated.
+def verify_schema_invariants(db_path: str = DB_PATH):
+    """
+    Validates required schema invariants at startup without mutating the database.
+    Fails closed with a clear RuntimeError if tables, columns, constraints, or NOT NULL requirements are violated.
+    """
     if not os.path.exists(db_path):
         return
 
@@ -18,162 +23,67 @@ def ensure_schema_migrations(db_path: str = DB_PATH):
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
-        # 1. scan_history table migrations
-        cursor.execute("PRAGMA table_info(scan_history)")
-        scan_columns = [row[1] for row in cursor.fetchall()]
-        if scan_columns:
-            if "user_id" not in scan_columns:
-                cursor.execute("ALTER TABLE scan_history ADD COLUMN user_id VARCHAR")
-                cursor.execute("CREATE INDEX IF NOT EXISTS ix_scan_history_user_id ON scan_history (user_id)")
-            if "guest_session_hash" not in scan_columns:
-                cursor.execute("ALTER TABLE scan_history ADD COLUMN guest_session_hash VARCHAR")
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS ix_scan_history_guest_session_hash "
-                    "ON scan_history (guest_session_hash)"
-                )
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        existing_tables = set(r[0] for r in cursor.fetchall())
 
-        # 2. threat_feed_states table creation if missing
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='threat_feed_states'")
-        if not cursor.fetchone():
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS threat_feed_states (
-                    source VARCHAR(64) PRIMARY KEY,
-                    enabled BOOLEAN NOT NULL DEFAULT 1,
-                    status VARCHAR(32) NOT NULL DEFAULT 'idle',
-                    freshness VARCHAR(32) NOT NULL DEFAULT 'never_synced',
-                    last_success_at VARCHAR(32),
-                    last_attempt_at VARCHAR(32),
-                    last_success_count INTEGER NOT NULL DEFAULT 0,
-                    last_error VARCHAR(256),
-                    etag VARCHAR(128),
-                    last_modified VARCHAR(128),
-                    current_generation_id VARCHAR(36),
-                    refresh_interval_seconds INTEGER NOT NULL DEFAULT 86400,
-                    updated_at VARCHAR(32) NOT NULL
-                )
-            """)
-
-        # 3. threat_indicators table migrations
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='threat_indicators'")
-        if cursor.fetchone():
+        # If database has existing application tables, verify schema invariants
+        if "threat_indicators" in existing_tables:
             cursor.execute("PRAGMA table_info(threat_indicators)")
-            threat_columns = [row[1] for row in cursor.fetchall()]
+            cols_info = {row[1]: row for row in cursor.fetchall()}
 
-            # Add generation_id if absent
-            if "generation_id" not in threat_columns:
-                cursor.execute("ALTER TABLE threat_indicators ADD COLUMN generation_id VARCHAR(36)")
-
-            # Assign legacy generation IDs to rows where generation_id IS NULL
-            cursor.execute("SELECT DISTINCT source FROM threat_indicators WHERE generation_id IS NULL OR generation_id = ''")
-            legacy_sources = [r[0] for r in cursor.fetchall() if r[0]]
-            for src in legacy_sources:
-                legacy_gen = f"legacy-gen-{src}"
-                cursor.execute(
-                    "UPDATE threat_indicators SET generation_id = ? WHERE source = ? AND (generation_id IS NULL OR generation_id = '')",
-                    (legacy_gen, src),
+            # 1. generation_id column must exist and be NOT NULL (row[3] == 1 in table_info)
+            if "generation_id" not in cols_info:
+                raise RuntimeError(
+                    f"Database schema incompatible on {db_path}: 'generation_id' column is missing from 'threat_indicators'. "
+                    "Run 'alembic upgrade head' before starting the application."
+                )
+            if cols_info["generation_id"][3] != 1:
+                raise RuntimeError(
+                    f"Database schema incompatible on {db_path}: 'generation_id' must be NOT NULL in 'threat_indicators'. "
+                    "Run 'alembic upgrade head' before starting the application."
                 )
 
-            # Reconcile ThreatFeedState for every source in threat_indicators
-            cursor.execute("SELECT DISTINCT source FROM threat_indicators")
-            all_sources = [r[0] for r in cursor.fetchall() if r[0]]
-            for src in all_sources:
-                legacy_gen = f"legacy-gen-{src}"
-                cursor.execute(
-                    "SELECT COUNT(*) FROM threat_indicators WHERE source = ? AND generation_id = ?",
-                    (src, legacy_gen),
-                )
-                cnt = cursor.fetchone()[0] or 0
-
-                cursor.execute("SELECT source, current_generation_id FROM threat_feed_states WHERE source = ?", (src,))
-                st = cursor.fetchone()
-                if not st:
-                    cursor.execute("""
-                        INSERT INTO threat_feed_states (source, enabled, status, freshness, last_success_count, current_generation_id, refresh_interval_seconds, updated_at)
-                        VALUES (?, 1, 'idle', 'stale', ?, ?, 86400, datetime('now'))
-                    """, (src, cnt, legacy_gen))
-                else:
-                    curr_gen = st[1]
-                    if not curr_gen:
-                        cursor.execute("""
-                            UPDATE threat_feed_states
-                            SET current_generation_id = ?, freshness = 'stale', status = 'idle', last_success_at = NULL, last_success_count = ?, updated_at = datetime('now')
-                            WHERE source = ?
-                        """, (legacy_gen, cnt, src))
-                    else:
-                        cursor.execute(
-                            "SELECT COUNT(*) FROM threat_indicators WHERE source = ? AND generation_id = ?",
-                            (src, curr_gen),
-                        )
-                        active_cnt = cursor.fetchone()[0] or 0
-                        if active_cnt == 0:
-                            cursor.execute("""
-                                UPDATE threat_feed_states
-                                SET current_generation_id = ?, freshness = 'stale', status = 'idle', last_success_at = NULL, last_success_count = ?, updated_at = datetime('now')
-                                WHERE source = ?
-                            """, (legacy_gen, cnt, src))
-
-            # Inspect table SQL to determine if unique constraint needs migration
+            # 2. Check table SQL for generation-aware uniqueness and absence of legacy uniqueness
             cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='threat_indicators'")
             tbl_sql = cursor.fetchone()[0] or ""
-            needs_constraint_migration = (
-                "generation_id" not in tbl_sql
-                or "uq_source_gen_type_indicator" not in tbl_sql
-                or "UNIQUE (source, indicator_type, indicator_hash)" in tbl_sql
-                or "UNIQUE(source, indicator_type, indicator_hash)" in tbl_sql
-                or "uq_source_type_indicator" in tbl_sql
-            )
+            if "uq_source_gen_type_indicator" not in tbl_sql:
+                raise RuntimeError(
+                    f"Database schema incompatible on {db_path}: 'uq_source_gen_type_indicator' constraint missing. "
+                    "Run 'alembic upgrade head' before starting the application."
+                )
+            if "uq_source_type_indicator" in tbl_sql:
+                raise RuntimeError(
+                    f"Database schema incompatible on {db_path}: legacy 'uq_source_type_indicator' constraint still present. "
+                    "Run 'alembic upgrade head' before starting the application."
+                )
 
-            if needs_constraint_migration:
-                # Recreate table with new unique constraint
-                cursor.execute("""
-                    CREATE TABLE threat_indicators_migrated (
-                        id VARCHAR(36) PRIMARY KEY,
-                        source VARCHAR(64) NOT NULL,
-                        indicator_type VARCHAR(32) NOT NULL,
-                        indicator VARCHAR(2048) NOT NULL,
-                        indicator_hash VARCHAR(64) NOT NULL,
-                        classification VARCHAR(64) NOT NULL,
-                        confidence FLOAT NOT NULL,
-                        observed_at VARCHAR(32) NOT NULL,
-                        expires_at VARCHAR(32),
-                        generation_id VARCHAR(36),
-                        created_at VARCHAR(32) NOT NULL,
-                        updated_at VARCHAR(32) NOT NULL,
-                        CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash)
-                    )
-                """)
-                cursor.execute("""
-                    INSERT INTO threat_indicators_migrated (
-                        id, source, indicator_type, indicator, indicator_hash,
-                        classification, confidence, observed_at, expires_at,
-                        generation_id, created_at, updated_at
-                    )
-                    SELECT
-                        id, source, indicator_type, indicator, indicator_hash,
-                        classification, confidence, observed_at, expires_at,
-                        generation_id, created_at, updated_at
-                    FROM threat_indicators
-                """)
-                cursor.execute("DROP TABLE threat_indicators")
-                cursor.execute("ALTER TABLE threat_indicators_migrated RENAME TO threat_indicators")
+            # 3. threat_feed_states table must exist
+            if "threat_feed_states" not in existing_tables:
+                raise RuntimeError(
+                    f"Database schema incompatible on {db_path}: 'threat_feed_states' table is missing. "
+                    "Run 'alembic upgrade head' before starting the application."
+                )
 
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_source ON threat_indicators (source)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_indicator_type ON threat_indicators (indicator_type)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_indicator_hash ON threat_indicators (indicator_hash)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_classification ON threat_indicators (classification)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_expires_at ON threat_indicators (expires_at)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_generation_id ON threat_indicators (generation_id)")
+        if "scan_history" in existing_tables:
+            cursor.execute("PRAGMA table_info(scan_history)")
+            scan_cols = set(row[1] for row in cursor.fetchall())
+            if "user_id" not in scan_cols or "guest_session_hash" not in scan_cols:
+                raise RuntimeError(
+                    f"Database schema incompatible on {db_path}: required columns missing from 'scan_history'. "
+                    "Run 'alembic upgrade head' before starting the application."
+                )
 
-        conn.commit()
     except Exception as e:
-        if conn:
-            conn.rollback()
-        raise RuntimeError(f"Database schema migration failed on {db_path}: {e}") from e
+        raise RuntimeError(f"Database schema verification failed on {db_path}: {e}") from e
     finally:
         if conn:
             conn.close()
 
-ensure_schema_migrations()
+
+# Compatibility alias
+ensure_schema_migrations = verify_schema_invariants
+
+verify_schema_invariants()
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}

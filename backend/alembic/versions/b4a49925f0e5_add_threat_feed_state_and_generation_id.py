@@ -1,7 +1,7 @@
 """add_threat_feed_state_and_generation_id
 
 Revision ID: b4a49925f0e5
-Revises: 
+Revises: a1b2c3d4e5f6
 Create Date: 2026-10-04 16:27:17.946010
 
 """
@@ -13,13 +13,13 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'b4a49925f0e5'
-down_revision: Union[str, Sequence[str], None] = None
+down_revision: Union[str, Sequence[str], None] = 'a1b2c3d4e5f6'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema: assign legacy generations, reconcile threat_feed_states, and establish generation-aware uniqueness."""
+    """Upgrade schema: assign legacy generations, enforce generation_id NOT NULL, reconcile threat_feed_states, and establish generation-aware uniqueness."""
     conn = op.get_bind()
     inspector = sa.inspect(conn)
 
@@ -59,6 +59,11 @@ def upgrade() -> None:
                     {"gen": legacy_gen, "src": src}
                 )
 
+        # Enforce invariant: verify no NULL generation_id rows remain
+        null_count = conn.execute(sa.text("SELECT COUNT(*) FROM threat_indicators WHERE generation_id IS NULL OR generation_id = ''")).scalar() or 0
+        if null_count > 0:
+            raise RuntimeError(f"Database migration failed: {null_count} rows in threat_indicators have NULL generation_id.")
+
         # Reconcile ThreatFeedState for every source in threat_indicators
         sources = [r[0] for r in conn.execute(sa.text("SELECT DISTINCT source FROM threat_indicators")).fetchall() if r[0]]
         for src in sources:
@@ -96,12 +101,13 @@ def upgrade() -> None:
                             {"src": src, "cnt": cnt, "gen": legacy_gen}
                         )
 
-        # Batch recreate table to replace old UNIQUE(source, indicator_type, indicator_hash)
+        # Batch recreate table to enforce generation_id NOT NULL and replace old UNIQUE(source, indicator_type, indicator_hash)
         # with new UNIQUE(source, generation_id, indicator_type, indicator_hash)
         uq_names = [u.get("name") for u in inspector.get_unique_constraints("threat_indicators") if u.get("name")]
         existing_idx_names = [i["name"] for i in inspector.get_indexes("threat_indicators")]
 
         with op.batch_alter_table("threat_indicators", recreate="always") as batch_op:
+            batch_op.alter_column("generation_id", nullable=False, existing_type=sa.String(36))
             if "uq_source_type_indicator" in uq_names:
                 batch_op.drop_constraint("uq_source_type_indicator", type_="unique")
             batch_op.create_unique_constraint(
@@ -119,23 +125,52 @@ def upgrade() -> None:
             for idx_name, cols in required_indexes:
                 if idx_name not in existing_idx_names:
                     batch_op.create_index(idx_name, cols)
+    else:
+        # If threat_indicators table is created fresh in this revision
+        op.create_table(
+            "threat_indicators",
+            sa.Column("id", sa.String(36), primary_key=True),
+            sa.Column("source", sa.String(64), nullable=False),
+            sa.Column("indicator_type", sa.String(32), nullable=False),
+            sa.Column("indicator", sa.String(2048), nullable=False),
+            sa.Column("indicator_hash", sa.String(64), nullable=False),
+            sa.Column("classification", sa.String(64), nullable=False),
+            sa.Column("confidence", sa.Float(), nullable=False, server_default="1.0"),
+            sa.Column("observed_at", sa.String(32), nullable=False),
+            sa.Column("expires_at", sa.String(32), nullable=True),
+            sa.Column("generation_id", sa.String(36), nullable=False),
+            sa.Column("created_at", sa.String(32), nullable=False),
+            sa.Column("updated_at", sa.String(32), nullable=False),
+            sa.UniqueConstraint("source", "generation_id", "indicator_type", "indicator_hash", name="uq_source_gen_type_indicator"),
+        )
+        op.create_index("ix_threat_indicators_source", "threat_indicators", ["source"])
+        op.create_index("ix_threat_indicators_indicator_type", "threat_indicators", ["indicator_type"])
+        op.create_index("ix_threat_indicators_indicator_hash", "threat_indicators", ["indicator_hash"])
+        op.create_index("ix_threat_indicators_classification", "threat_indicators", ["classification"])
+        op.create_index("ix_threat_indicators_expires_at", "threat_indicators", ["expires_at"])
+        op.create_index("ix_threat_indicators_generation_id", "threat_indicators", ["generation_id"])
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
+    """Downgrade schema: fail closed on cross-generation duplicates to protect data integrity."""
     conn = op.get_bind()
     inspector = sa.inspect(conn)
-    if "threat_feed_states" in inspector.get_table_names():
-        op.drop_table("threat_feed_states")
+
     if "threat_indicators" in inspector.get_table_names():
-        # Deduplicate any cross-generation duplicate records before reverting to legacy UNIQUE(source, indicator_type, indicator_hash)
-        conn.execute(sa.text("""
-            DELETE FROM threat_indicators
-            WHERE id NOT IN (
-                SELECT MIN(id) FROM threat_indicators
-                GROUP BY source, indicator_type, indicator_hash
+        # Check for cross-generation duplicate records
+        dups = conn.execute(sa.text("""
+            SELECT source, indicator_type, indicator_hash, COUNT(*) as cnt
+            FROM threat_indicators
+            GROUP BY source, indicator_type, indicator_hash
+            HAVING cnt > 1
+        """)).fetchall()
+
+        if dups:
+            raise RuntimeError(
+                f"Cannot downgrade schema: {len(dups)} cross-generation duplicate indicator groups exist in threat_indicators. "
+                "Refusing unsafe destructive rollback."
             )
-        """))
+
         uq_names = [u.get("name") for u in inspector.get_unique_constraints("threat_indicators") if u.get("name")]
         existing_idx_names = [i["name"] for i in inspector.get_indexes("threat_indicators")]
         with op.batch_alter_table("threat_indicators", recreate="always") as batch_op:
@@ -148,3 +183,6 @@ def downgrade() -> None:
                 "uq_source_type_indicator",
                 ["source", "indicator_type", "indicator_hash"]
             )
+
+    if "threat_feed_states" in inspector.get_table_names():
+        op.drop_table("threat_feed_states")

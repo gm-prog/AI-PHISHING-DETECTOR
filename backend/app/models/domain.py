@@ -52,7 +52,7 @@ class ThreatIndicator(Base):
     confidence = Column(Float, default=1.0, nullable=False)
     observed_at = Column(String(32), nullable=False)
     expires_at = Column(String(32), nullable=True, index=True)
-    generation_id = Column(String(36), nullable=True, index=True)
+    generation_id = Column(String(36), nullable=False, index=True)
     created_at = Column(String(32), default=lambda: datetime.now(timezone.utc).isoformat(), nullable=False)
     updated_at = Column(String(32), default=lambda: datetime.now(timezone.utc).isoformat(), nullable=False)
 

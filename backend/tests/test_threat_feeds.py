@@ -464,6 +464,11 @@ async def test_phishtank_keyed_url_construction_and_bz2_decompression():
     with pytest.raises(ValueError, match="empty payload"):
         decompress_bz2_bounded(b"", max_decompressed_bytes=1000)
 
+    # 8. Trailing data after EOF must be rejected
+    comp_with_trailing = compressed + b"unexpected_trailing_garbage"
+    with pytest.raises(ValueError, match="unexpected trailing data after EOF"):
+        decompress_bz2_bounded(comp_with_trailing, max_decompressed_bytes=10000)
+
 
 @pytest.mark.asyncio
 async def test_threat_feed_compressed_and_decompressed_limits_independent(db_session):
@@ -920,17 +925,20 @@ async def test_realistic_legacy_database_migration_coexistence_and_lifecycle(tmp
     Requirements Parts B, C, D, E, F, G, H, I, R, S:
     1. Recreate realistic legacy pre-Task-3 database with UNIQUE(source, indicator_type, indicator_hash).
     2. Populate with legacy records with generation_id = NULL.
-    3. Run schema migration.
+    3. Run Alembic migration.
     4. Verify:
        - Old unique constraint is removed, new unique constraint UNIQUE(source, generation_id, indicator_type, indicator_hash) is present.
+       - generation_id is NOT NULL.
        - Legacy records receive deterministic legacy-gen-{source} generation_id.
        - ThreatFeedState records created with current_generation_id = legacy-gen-{source} and freshness = 'stale'.
        - Legacy records are searchable via lookup_threat_indicator.
        - Staging a new generation containing an indicator present in legacy generation succeeds (coexistence).
        - After activation of new generation, indicators present in new generation match, and removed indicators stop matching.
     """
+    import os
     import sqlite3
-    from app.db import ensure_schema_migrations
+    from alembic.config import Config
+    from alembic import command
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -981,8 +989,14 @@ async def test_realistic_legacy_database_migration_coexistence_and_lifecycle(tmp
     conn.commit()
     conn.close()
 
-    # 2. Perform Migration
-    ensure_schema_migrations(test_db_file)
+    # 2. Perform Migration via Alembic
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ini_path = os.path.join(backend_dir, "alembic.ini")
+    alembic_cfg = Config(ini_path)
+    alembic_cfg.set_main_option("sqlalchemy.url", f"sqlite:///{test_db_file}")
+    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+
+    command.upgrade(alembic_cfg, "head")
 
     # 3. Inspect Migrated Schema & Data
     conn2 = sqlite3.connect(test_db_file)
@@ -993,6 +1007,12 @@ async def test_realistic_legacy_database_migration_coexistence_and_lifecycle(tmp
     new_ddl = cursor2.fetchone()[0]
     assert "generation_id" in new_ddl
     assert "uq_source_gen_type_indicator" in new_ddl
+    assert "uq_source_type_indicator" not in new_ddl
+
+    # Verify generation_id NOT NULL
+    cursor2.execute("PRAGMA table_info(threat_indicators)")
+    cols_map = {r[1]: r for r in cursor2.fetchall()}
+    assert cols_map["generation_id"][3] == 1, "generation_id must be NOT NULL"
 
     # Verify legacy generations assigned
     cursor2.execute("SELECT source, generation_id FROM threat_indicators WHERE id='id-1'")
@@ -1048,50 +1068,159 @@ async def test_realistic_legacy_database_migration_coexistence_and_lifecycle(tmp
         session.close()
 
 
-def test_migration_failure_fails_closed_and_raises(tmp_path, monkeypatch):
+def test_runtime_schema_verification_and_fail_closed(tmp_path):
     """
-    Requirement Part J, Y & 11:
-    Prove that database migration errors raise RuntimeError, roll back the transaction,
-    and fail closed so that partially migrated schema or corrupt states are not committed.
+    Requirements 9, 33, 34, 35:
+    Prove that runtime startup validates required schema invariants without silently mutating the DB,
+    and fails closed with RuntimeError on incompatible or unmigrated schemas.
     """
-    from app.db import ensure_schema_migrations
+    from app.db import verify_schema_invariants
     import sqlite3
 
-    corrupt_db_file = str(tmp_path / "corrupt_test.db")
-    # Create invalid table state where required columns are missing and cannot be copied
-    conn = sqlite3.connect(corrupt_db_file)
+    valid_db_file = str(tmp_path / "valid_test.db")
+    # Create valid migrated schema
+    conn = sqlite3.connect(valid_db_file)
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE threat_indicators (id VARCHAR PRIMARY KEY, source VARCHAR)")
-    cursor.execute("INSERT INTO threat_indicators VALUES ('1', 'phishtank')")
+    cursor.execute("""
+        CREATE TABLE threat_indicators (
+            id VARCHAR(36) PRIMARY KEY,
+            source VARCHAR(64) NOT NULL,
+            indicator_type VARCHAR(32) NOT NULL,
+            indicator VARCHAR(2048) NOT NULL,
+            indicator_hash VARCHAR(64) NOT NULL,
+            classification VARCHAR(64) NOT NULL,
+            confidence FLOAT NOT NULL,
+            observed_at VARCHAR(32) NOT NULL,
+            expires_at VARCHAR(32),
+            generation_id VARCHAR(36) NOT NULL,
+            created_at VARCHAR(32) NOT NULL,
+            updated_at VARCHAR(32) NOT NULL,
+            CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE threat_feed_states (
+            source VARCHAR(64) PRIMARY KEY,
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            status VARCHAR(32) NOT NULL DEFAULT 'idle',
+            freshness VARCHAR(32) NOT NULL DEFAULT 'never_synced',
+            last_success_at VARCHAR(32),
+            last_attempt_at VARCHAR(32),
+            last_success_count INTEGER NOT NULL DEFAULT 0,
+            last_error VARCHAR(256),
+            etag VARCHAR(128),
+            last_modified VARCHAR(128),
+            current_generation_id VARCHAR(36),
+            refresh_interval_seconds INTEGER NOT NULL DEFAULT 86400,
+            updated_at VARCHAR(32) NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE scan_history (
+            id VARCHAR PRIMARY KEY,
+            user_id VARCHAR,
+            guest_session_hash VARCHAR
+        )
+    """)
     conn.commit()
     conn.close()
 
-    # ensure_schema_migrations must fail, rollback, and raise RuntimeError
-    with pytest.raises(RuntimeError, match="Database schema migration failed"):
-        ensure_schema_migrations(corrupt_db_file)
+    # Valid schema passes validation
+    verify_schema_invariants(valid_db_file)
 
-    # Verify that the original table was not replaced with an empty or broken migrated table
-    conn2 = sqlite3.connect(corrupt_db_file)
+    # Incompatible schema (nullable generation_id) fails closed
+    incompat_db_file = str(tmp_path / "incompat_test.db")
+    conn2 = sqlite3.connect(incompat_db_file)
     cursor2 = conn2.cursor()
-    cursor2.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='threat_indicators_migrated'")
-    assert cursor2.fetchone() is None, "Temporary migration table must not remain after rollback"
+    cursor2.execute("""
+        CREATE TABLE threat_indicators (
+            id VARCHAR(36) PRIMARY KEY,
+            source VARCHAR(64) NOT NULL,
+            indicator_type VARCHAR(32) NOT NULL,
+            indicator VARCHAR(2048) NOT NULL,
+            indicator_hash VARCHAR(64) NOT NULL,
+            classification VARCHAR(64) NOT NULL,
+            confidence FLOAT NOT NULL,
+            observed_at VARCHAR(32) NOT NULL,
+            expires_at VARCHAR(32),
+            generation_id VARCHAR(36), -- Nullable!
+            created_at VARCHAR(32) NOT NULL,
+            updated_at VARCHAR(32) NOT NULL,
+            CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash)
+        )
+    """)
+    conn2.commit()
     conn2.close()
+
+    with pytest.raises(RuntimeError, match="generation_id' must be NOT NULL"):
+        verify_schema_invariants(incompat_db_file)
+
+
+def test_fresh_database_alembic_upgrade_and_schema_validation(tmp_path):
+    """
+    Requirements 1, 13, 17, 33, 35:
+    Prove that a brand new empty SQLite database upgrades cleanly to head via Alembic,
+    creating all tables, NOT NULL constraints, unique constraints, and indexes.
+    """
+    import os
+    import sqlite3
+    from alembic.config import Config
+    from alembic import command
+    from app.db import verify_schema_invariants
+
+    fresh_db_file = str(tmp_path / "fresh_alembic.db")
+
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ini_path = os.path.join(backend_dir, "alembic.ini")
+    alembic_cfg = Config(ini_path)
+    alembic_cfg.set_main_option("sqlalchemy.url", f"sqlite:///{fresh_db_file}")
+    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+
+    # Upgrade empty DB to head
+    command.upgrade(alembic_cfg, "head")
+
+    conn = sqlite3.connect(fresh_db_file)
+    cursor = conn.cursor()
+
+    # Verify all expected tables exist
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = set(r[0] for r in cursor.fetchall())
+    expected_tables = {"users", "user_sessions", "scan_history", "threat_indicators", "threat_feed_states", "alembic_version"}
+    assert expected_tables.issubset(tables)
+
+    # Verify generation_id is NOT NULL
+    cursor.execute("PRAGMA table_info(threat_indicators)")
+    cols_map = {r[1]: r for r in cursor.fetchall()}
+    assert cols_map["generation_id"][3] == 1, "generation_id must be NOT NULL in threat_indicators"
+
+    # Verify database rejects NULL generation_id on insert
+    with pytest.raises(sqlite3.IntegrityError):
+        cursor.execute("""
+            INSERT INTO threat_indicators (id, source, generation_id, indicator_type, indicator, indicator_hash, classification, confidence, observed_at, created_at, updated_at)
+            VALUES ('null-gen-rec', 'phishtank', NULL, 'url', 'https://null-gen.com', 'h_null', 'phishing', 1.0, '2026-10-04T00:00:00Z', '2026-10-04T00:00:00Z', '2026-10-04T00:00:00Z')
+        """)
+    conn.rollback()
+    conn.close()
+
+    # Verify runtime schema invariant validation passes
+    verify_schema_invariants(fresh_db_file)
 
 
 def test_alembic_realistic_legacy_migration_pragma_indexes_and_coexistence(tmp_path):
     """
-    Requirements 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 30, 31, 32:
+    Requirements 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 30, 31, 32:
     1. Realistic legacy schema containing all columns, legacy constraint uq_source_type_indicator, and legacy indexes.
     2. Populate legacy records across multiple sources and edge-case threat_feed_states.
     3. Run Alembic upgrade head.
     4. Direct PRAGMA & sqlite_master inspection:
        - Old constraint uq_source_type_indicator ABSENT.
        - New constraint uq_source_gen_type_indicator PRESENT.
+       - generation_id NOT NULL (notnull=1).
        - All 6 indexes exist.
     5. Verify legacy generation IDs & state reconciliation.
     6. Verify duplicate indicator across generations succeeds (Generation Coexistence).
-    7. Verify migration idempotency (running upgrade head again).
-    8. Verify downgrade to base and re-upgrade to head.
+    7. Verify unsafe downgrade refusal when cross-generation duplicates exist.
+    8. Verify safe downgrade and re-upgrade when cross-generation duplicates are removed.
     """
     import os
     import sqlite3
@@ -1199,10 +1328,11 @@ def test_alembic_realistic_legacy_migration_pragma_indexes_and_coexistence(tmp_p
     for exp_idx in expected_indexes:
         assert exp_idx in idx_list, f"Expected index {exp_idx} missing from migrated table"
 
-    # PROOF: Column generation_id exists and legacy data preserved
+    # PROOF: Column generation_id exists, is NOT NULL, and legacy data is preserved
     cursor2.execute("PRAGMA table_info(threat_indicators)")
-    cols = [r[1] for r in cursor2.fetchall()]
-    assert "generation_id" in cols
+    cols_map = {r[1]: r for r in cursor2.fetchall()}
+    assert "generation_id" in cols_map
+    assert cols_map["generation_id"][3] == 1, "generation_id must be NOT NULL"
 
     cursor2.execute("SELECT generation_id FROM threat_indicators WHERE id='leg-pt-1'")
     assert cursor2.fetchone()[0] == "legacy-gen-phishtank"
@@ -1224,7 +1354,6 @@ def test_alembic_realistic_legacy_migration_pragma_indexes_and_coexistence(tmp_p
     assert st_op[2] == "legacy-gen-openphish"
 
     # 4. PROOF: Generation Coexistence (Stage duplicate indicator into new generation)
-    # Under legacy schema, inserting identical (source, indicator_type, indicator_hash) would fail with IntegrityError
     cursor2.execute("""
         INSERT INTO threat_indicators (id, source, generation_id, indicator_type, indicator, indicator_hash, classification, confidence, observed_at, created_at, updated_at)
         VALUES ('staged-new-pt-1', 'phishtank', 'gen-new-stage-2026', 'url', ?, ?, 'phishing', 0.99, '2026-10-04T12:00:00Z', '2026-10-04T12:00:00Z', '2026-10-04T12:00:00Z')
@@ -1234,14 +1363,25 @@ def test_alembic_realistic_legacy_migration_pragma_indexes_and_coexistence(tmp_p
     # Verify both generations coexist in the database
     cursor2.execute("SELECT COUNT(*) FROM threat_indicators WHERE source='phishtank' AND indicator_hash=?", (h_pt,))
     assert cursor2.fetchone()[0] == 2, "Duplicate indicator across two generations must coexist successfully"
+
+    # 5. PROOF: Unsafe Downgrade Refusal with Cross-Generation Duplicates
+    # Attempting downgrade with duplicate (source, type, hash) MUST raise RuntimeError and leave DB intact
+    with pytest.raises(Exception, match="Refusing unsafe destructive rollback"):
+        command.downgrade(alembic_cfg, "a1b2c3d4e5f6")
+
+    # Verify DB unchanged after refused downgrade
+    cursor2.execute("SELECT COUNT(*) FROM threat_indicators WHERE source='phishtank' AND indicator_hash=?", (h_pt,))
+    assert cursor2.fetchone()[0] == 2, "Rows must not be deleted on refused downgrade"
+    cursor2.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='threat_indicators'")
+    assert "uq_source_gen_type_indicator" in cursor2.fetchone()[0]
+
+    # 6. PROOF: Safe Downgrade after removing duplicate generation record
+    cursor2.execute("DELETE FROM threat_indicators WHERE id='staged-new-pt-1'")
+    conn2.commit()
     conn2.close()
 
-    # 5. PROOF: Migration Idempotency
-    # Running upgrade head again on already-migrated database must succeed without errors
-    command.upgrade(alembic_cfg, "head")
+    command.downgrade(alembic_cfg, "a1b2c3d4e5f6")
 
-    # 6. PROOF: Downgrade to base and re-upgrade to head
-    command.downgrade(alembic_cfg, "base")
     conn3 = sqlite3.connect(test_db_file)
     cursor3 = conn3.cursor()
     cursor3.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='threat_feed_states'")
@@ -1249,8 +1389,10 @@ def test_alembic_realistic_legacy_migration_pragma_indexes_and_coexistence(tmp_p
     cursor3.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='threat_indicators'")
     downgraded_sql = cursor3.fetchone()[0]
     assert "uq_source_type_indicator" in downgraded_sql
+    assert "generation_id" not in downgraded_sql
     conn3.close()
 
+    # 7. PROOF: Upgrade back to head
     command.upgrade(alembic_cfg, "head")
     conn4 = sqlite3.connect(test_db_file)
     cursor4 = conn4.cursor()
@@ -1258,6 +1400,9 @@ def test_alembic_realistic_legacy_migration_pragma_indexes_and_coexistence(tmp_p
     reupgraded_sql = cursor4.fetchone()[0]
     assert "uq_source_gen_type_indicator" in reupgraded_sql
     assert "uq_source_type_indicator" not in reupgraded_sql
+    cursor4.execute("PRAGMA table_info(threat_indicators)")
+    cols_map4 = {r[1]: r for r in cursor4.fetchall()}
+    assert cols_map4["generation_id"][3] == 1, "generation_id must be NOT NULL"
     conn4.close()
 
 

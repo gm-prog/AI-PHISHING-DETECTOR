@@ -183,6 +183,10 @@ def decompress_bz2_bounded(
         if not decompressor.eof:
             raise ValueError("Invalid or truncated BZ2 stream: stream did not reach EOF marker")
 
+        trailing = (decompressor.unused_data or b"") + compressed_bytes[offset:]
+        if trailing:
+            raise ValueError("Invalid BZ2 stream: unexpected trailing data after EOF")
+
     except ValueError:
         raise
     except (OSError, EOFError) as e:
