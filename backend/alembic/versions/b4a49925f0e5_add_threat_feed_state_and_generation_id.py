@@ -5,6 +5,7 @@ Revises: a1b2c3d4e5f6
 Create Date: 2026-10-04 16:27:17.946010
 
 """
+from datetime import datetime, timezone
 from typing import Sequence, Union
 
 from alembic import op
@@ -28,7 +29,9 @@ def upgrade() -> None:
         op.create_table(
             "threat_feed_states",
             sa.Column("source", sa.String(64), primary_key=True),
-            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+            # sa.true() renders as a dialect-correct boolean default
+            # (1 on SQLite, true on PostgreSQL).
+            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
             sa.Column("status", sa.String(32), nullable=False, server_default="idle"),
             sa.Column("freshness", sa.String(32), nullable=False, server_default="never_synced"),
             sa.Column("last_success_at", sa.String(32), nullable=True),
@@ -83,7 +86,11 @@ def upgrade() -> None:
         if null_count > 0:
             raise RuntimeError(f"Database migration failed: {null_count} rows in threat_indicators have NULL generation_id.")
 
-        # Reconcile ThreatFeedState for every source in threat_indicators
+        # Reconcile ThreatFeedState for every source in threat_indicators.
+        # Timestamps and booleans are bound as parameters (not inline SQL
+        # functions) so the statements run identically on SQLite and
+        # PostgreSQL.
+        now_iso = datetime.now(timezone.utc).isoformat()
         sources = [r[0] for r in conn.execute(sa.text("SELECT DISTINCT source FROM threat_indicators")).fetchall() if r[0]]
         for src in sources:
             legacy_gen = f"legacy-gen-{src}"
@@ -93,9 +100,9 @@ def upgrade() -> None:
                 conn.execute(
                     sa.text("""
                         INSERT INTO threat_feed_states (source, enabled, status, freshness, last_success_count, current_generation_id, refresh_interval_seconds, updated_at)
-                        VALUES (:src, 1, 'idle', 'stale', :cnt, :gen, 86400, datetime('now'))
+                        VALUES (:src, :enabled, 'idle', 'stale', :cnt, :gen, 86400, :now)
                     """),
-                    {"src": src, "cnt": cnt, "gen": legacy_gen}
+                    {"src": src, "enabled": True, "cnt": cnt, "gen": legacy_gen, "now": now_iso}
                 )
             else:
                 curr_gen = st[1]
@@ -103,10 +110,10 @@ def upgrade() -> None:
                     conn.execute(
                         sa.text("""
                             UPDATE threat_feed_states
-                            SET current_generation_id = :gen, freshness = 'stale', status = 'idle', last_success_at = NULL, last_success_count = :cnt, updated_at = datetime('now')
+                            SET current_generation_id = :gen, freshness = 'stale', status = 'idle', last_success_at = NULL, last_success_count = :cnt, updated_at = :now
                             WHERE source = :src
                         """),
-                        {"src": src, "cnt": cnt, "gen": legacy_gen}
+                        {"src": src, "cnt": cnt, "gen": legacy_gen, "now": now_iso}
                     )
                 else:
                     active_cnt = conn.execute(sa.text("SELECT COUNT(*) FROM threat_indicators WHERE source = :src AND generation_id = :curr"), {"src": src, "curr": curr_gen}).scalar() or 0
@@ -114,10 +121,10 @@ def upgrade() -> None:
                         conn.execute(
                             sa.text("""
                                 UPDATE threat_feed_states
-                                SET current_generation_id = :gen, freshness = 'stale', status = 'idle', last_success_at = NULL, last_success_count = :cnt, updated_at = datetime('now')
+                                SET current_generation_id = :gen, freshness = 'stale', status = 'idle', last_success_at = NULL, last_success_count = :cnt, updated_at = :now
                                 WHERE source = :src
                             """),
-                            {"src": src, "cnt": cnt, "gen": legacy_gen}
+                            {"src": src, "cnt": cnt, "gen": legacy_gen, "now": now_iso}
                         )
 
         # Batch recreate table to enforce generation_id NOT NULL and replace old UNIQUE(source, indicator_type, indicator_hash)
@@ -125,7 +132,10 @@ def upgrade() -> None:
         uq_names = [u.get("name") for u in inspector.get_unique_constraints("threat_indicators") if u.get("name")]
         existing_idx_names = [i["name"] for i in inspector.get_indexes("threat_indicators")]
 
-        with op.batch_alter_table("threat_indicators", recreate="always") as batch_op:
+        # SQLite needs a full table recreate to change constraints;
+        # PostgreSQL supports native ALTER statements ("auto").
+        recreate_mode = "always" if conn.dialect.name == "sqlite" else "auto"
+        with op.batch_alter_table("threat_indicators", recreate=recreate_mode) as batch_op:
             batch_op.alter_column("generation_id", nullable=False, existing_type=sa.String(36))
             if "uq_source_type_indicator" in uq_names:
                 batch_op.drop_constraint("uq_source_type_indicator", type_="unique")
@@ -177,11 +187,13 @@ def downgrade() -> None:
 
     if "threat_indicators" in inspector.get_table_names():
         # Check for cross-generation duplicate records
+        # HAVING must repeat the aggregate (PostgreSQL does not allow
+        # referencing the SELECT alias inside HAVING).
         dups = conn.execute(sa.text("""
             SELECT source, indicator_type, indicator_hash, COUNT(*) as cnt
             FROM threat_indicators
             GROUP BY source, indicator_type, indicator_hash
-            HAVING cnt > 1
+            HAVING COUNT(*) > 1
         """)).fetchall()
 
         if dups:
@@ -192,7 +204,8 @@ def downgrade() -> None:
 
         uq_names = [u.get("name") for u in inspector.get_unique_constraints("threat_indicators") if u.get("name")]
         existing_idx_names = [i["name"] for i in inspector.get_indexes("threat_indicators")]
-        with op.batch_alter_table("threat_indicators", recreate="always") as batch_op:
+        recreate_mode = "always" if conn.dialect.name == "sqlite" else "auto"
+        with op.batch_alter_table("threat_indicators", recreate=recreate_mode) as batch_op:
             if "uq_source_gen_type_indicator" in uq_names:
                 batch_op.drop_constraint("uq_source_gen_type_indicator", type_="unique")
             if "ix_threat_indicators_generation_id" in existing_idx_names:

@@ -3,7 +3,7 @@
 ## Architecture & Trust Boundaries
 - **Frontend**: React + Vite + TypeScript (Single-Page Application)
 - **Backend API Gateway**: FastAPI (Python 3.11+, Uvicorn)
-- **Database / ORM**: SQLite (`phishing_detector.db`) + SQLAlchemy 2.0 ORM
+- **Database / ORM**: SQLAlchemy 2.x ORM — SQLite (`phishing_detector.db`) in development/test, PostgreSQL (psycopg2, explicit fail-closed `DATABASE_URL`) in staging/production (see `docs/deployment.md`)
 - **Authentication**: Opaque Server-Side Sessions with HttpOnly/SameSite Cookies (`sentinel_session`), CSRF double-submit validation (`sentinel_csrf` cookie + `X-CSRF-Token` header), bcrypt password hashing
 - **External AI Tier**: Google Gemini 3.6 Flash (Interactions API with explicit `store=False`; Generate Content compatibility fallback is non-persistent by default)
 - **External Intel Tier**: VirusTotal API, URLhaus Threat Feeds, Google Web Risk Lookup API, and local synchronized threat feeds (sanitized normalized contracts, bounded semaphores, TTL caching, O(1) indexed lookup)

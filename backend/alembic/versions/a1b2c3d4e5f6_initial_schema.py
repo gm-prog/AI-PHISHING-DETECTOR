@@ -32,7 +32,9 @@ def upgrade() -> None:
             sa.Column("email", sa.String(), nullable=False),
             sa.Column("hashed_password", sa.String(), nullable=False),
             sa.Column("role", sa.String(), nullable=False, server_default="user"),
-            sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+            # sa.true() renders as a dialect-correct boolean default
+            # (1 on SQLite, true on PostgreSQL).
+            sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
             sa.Column("created_at", sa.String(), nullable=True),
         )
         op.create_index("ix_users_id", "users", ["id"])
