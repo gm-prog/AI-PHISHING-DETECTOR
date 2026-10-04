@@ -22,10 +22,13 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SQLITE_PATH = os.path.join(BACKEND_DIR, "phishing_detector.db")
 DEFAULT_SQLITE_URL = f"sqlite:///{DEFAULT_SQLITE_PATH}"
 
-# One deliberate driver architecture: SQLAlchemy's default "postgresql"
-# dialect resolves to psycopg2, which is the single PostgreSQL DBAPI this
-# project installs (psycopg2-binary). "postgresql+psycopg2" is the same
-# driver spelled explicitly.
+# One deliberate driver architecture: this project installs psycopg2
+# (via psycopg2-binary) as its ONLY PostgreSQL DBAPI. Note that SQLAlchemy
+# 2.1+ resolves the bare "postgresql://" dialect to psycopg 3 by default,
+# which is NOT installed here; normalize_database_url() therefore rewrites
+# PostgreSQL URLs to the explicit "postgresql+psycopg2://" spelling so the
+# SQLAlchemy URL scheme always matches the installed driver. Both spellings
+# below are accepted as *input*; the normalized form is what the engine uses.
 SUPPORTED_POSTGRES_DRIVERNAMES = {"postgresql", "postgresql+psycopg2"}
 SQLITE_FALLBACK_ENVIRONMENTS = {"development", "test"}
 

@@ -200,6 +200,131 @@ class TestProductionImportFailClosed:
 
 
 # =====================================================================
+# Alembic URL resolution (env.py) — corrective-patch regression
+# =====================================================================
+
+def _load_resolve_alembic_url(fake_config, env_database_url=None, app_fallback="sqlite:///app-fallback.db"):
+    """
+    Execute the REAL `_resolve_alembic_url()` function from
+    backend/alembic/env.py (extracted via AST so importing env.py does not
+    trigger migration execution) against a stub Alembic config object.
+    No database connection is required or made.
+    """
+    import ast
+
+    env_path = os.path.join(BACKEND_DIR, "alembic", "env.py")
+    with open(env_path, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=env_path)
+
+    func = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_resolve_alembic_url"
+    )
+    module = ast.Module(body=[func], type_ignores=[])
+
+    class _FakeEnviron:
+        def __init__(self, database_url):
+            self._database_url = database_url
+
+        def getenv(self, key, default=""):
+            if key == "DATABASE_URL" and self._database_url is not None:
+                return self._database_url
+            return default if key == "DATABASE_URL" else os.getenv(key, default)
+
+    namespace = {
+        "os": _FakeEnviron(env_database_url),
+        "config": fake_config,
+        "normalize_database_url": normalize_database_url,
+        "SQLALCHEMY_DATABASE_URL": app_fallback,
+    }
+    exec(compile(module, env_path, "exec"), namespace)  # noqa: S102 — test-only, fixed local file
+    return namespace["_resolve_alembic_url"]
+
+
+class _FakeAlembicConfig:
+    """Mimics alembic.config.Config for URL-resolution purposes."""
+
+    def __init__(self, override=None):
+        self.config_file_name = os.path.join(BACKEND_DIR, "alembic.ini")
+        self._override = override
+
+    def get_main_option(self, name):
+        assert name == "sqlalchemy.url"
+        if self._override is not None:
+            return self._override
+        # No programmatic override: return the pristine ini value.
+        import configparser
+
+        parser = configparser.ConfigParser()
+        parser.read(self.config_file_name)
+        return parser.get("alembic", "sqlalchemy.url", raw=True)
+
+
+class TestResolveAlembicUrl:
+    def test_programmatic_legacy_postgres_override_is_normalized(self):
+        resolve = _load_resolve_alembic_url(
+            _FakeAlembicConfig(override="postgres://u:p@host:5432/db")
+        )
+        assert resolve() == "postgresql+psycopg2://u:p@host:5432/db"
+
+    def test_programmatic_generic_postgresql_override_is_normalized(self):
+        resolve = _load_resolve_alembic_url(
+            _FakeAlembicConfig(override="postgresql://u:p@host:5432/db")
+        )
+        assert resolve() == "postgresql+psycopg2://u:p@host:5432/db"
+
+    def test_programmatic_override_takes_precedence_over_database_url_env(self):
+        resolve = _load_resolve_alembic_url(
+            _FakeAlembicConfig(override="postgres://u:p@override-host:5432/override_db"),
+            env_database_url="postgresql://ignored:ignored@env-host:5432/env_db",
+        )
+        assert resolve() == "postgresql+psycopg2://u:p@override-host:5432/override_db"
+
+    def test_database_url_env_used_and_normalized_without_override(self):
+        resolve = _load_resolve_alembic_url(
+            _FakeAlembicConfig(override=None),
+            env_database_url="postgres://u:p@env-host:5432/env_db",
+        )
+        assert resolve() == "postgresql+psycopg2://u:p@env-host:5432/env_db"
+
+    def test_application_fallback_without_override_or_env(self):
+        resolve = _load_resolve_alembic_url(
+            _FakeAlembicConfig(override=None),
+            env_database_url=None,
+            app_fallback="sqlite:///app-fallback.db",
+        )
+        assert resolve() == "sqlite:///app-fallback.db"
+
+    def test_sqlite_programmatic_override_passes_through_unchanged(self):
+        # Existing test harnesses override with temp SQLite files; the
+        # normalization contract must not disturb them.
+        resolve = _load_resolve_alembic_url(
+            _FakeAlembicConfig(override="sqlite:////tmp/some-test.db")
+        )
+        assert resolve() == "sqlite:////tmp/some-test.db"
+
+    def test_normalized_override_preserves_every_url_component(self):
+        raw = (
+            "postgres://alice:p%40ss%2Fw%25rd@db.internal:6543/sentinel"
+            "?sslmode=verify-full&sslrootcert=%2Fetc%2Fssl%2Fca.pem&connect_timeout=5"
+        )
+        resolve = _load_resolve_alembic_url(_FakeAlembicConfig(override=raw))
+        resolved = resolve()
+        # Scheme-only rewrite: everything after '://' is byte-identical.
+        assert resolved.split("://", 1)[1] == raw.split("://", 1)[1]
+        parsed = make_url(resolved)
+        assert parsed.drivername == "postgresql+psycopg2"
+        assert parsed.username == "alice"
+        assert parsed.password == "p@ss/w%rd"  # percent-encoding preserved
+        assert parsed.host == "db.internal"
+        assert parsed.port == 6543
+        assert parsed.database == "sentinel"
+        assert parsed.query["sslmode"] == "verify-full"
+        assert parsed.query["sslrootcert"] == "/etc/ssl/ca.pem"
+        assert parsed.query["connect_timeout"] == "5"
+
+
+# =====================================================================
 # URL normalization
 # =====================================================================
 

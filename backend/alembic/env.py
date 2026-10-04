@@ -28,7 +28,8 @@ def _resolve_alembic_url() -> str:
 
     1. A programmatic override (e.g. tests calling
        Config.set_main_option("sqlalchemy.url", ...)) — detected because it
-       differs from the static value in alembic.ini.
+       differs from the static value in alembic.ini. The override is
+       normalized exactly like the application's own URL handling.
     2. The DATABASE_URL environment variable (normalized exactly like the
        application does), so deployments migrate the same database the
        application connects to.
@@ -50,7 +51,11 @@ def _resolve_alembic_url() -> str:
 
     current = config.get_main_option("sqlalchemy.url")
     if current and current != ini_url:
-        return current
+        # Programmatic overrides take highest precedence but must still pass
+        # through the application's normalization contract, so a caller
+        # supplying "postgres://..." or bare "postgresql://..." cannot bypass
+        # the pinned psycopg2 driver spelling.
+        return normalize_database_url(current)
 
     env_url = normalize_database_url(os.getenv("DATABASE_URL", ""))
     if env_url:
