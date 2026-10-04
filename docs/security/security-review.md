@@ -1,13 +1,13 @@
 # Production Web Security Hardening & Adversarial Security Review
 
-**Target System**: SENTINEL AI — Threat Intelligence Gateway  
-**Date**: September 21, 2026  
+**Target System**: SENTINEL AI — Threat Intelligence Gateway
+**Date**: October 4, 2026
 **Auditor**: Senior Application Security Engineer (Antigravity Agent)
 
 ---
 
 ## 1. Executive Summary
-A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, and all 11 security regression tests executed with 100% pass rate.
+A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, standards-aware email authentication parsing (RFC 8601/7601/7208/6376/7489) deployed with trusted authserv-id boundaries and zero raw header persistence, Google Web Risk bounded caching deployed with upstream-aware lifetime guarantees, dynamic threat feed foundation with indexed SHA-256 deduplication and deterministic multi-source classification integrated, production threat feed connectors (PhishTank, OpenPhish, MISP), authoritative Alembic database migrations with legacy scan_history and unique constraint reconciliation, generation_id NOT NULL enforcement, fail-closed unsafe downgrade protection, decoupled import with read-only startup invariant and Alembic head revision verification (`b4a49925f0e5`), bounded BZ2 decompression with EOF and trailing-byte validation, and all 114 backend tests executed with a 100% pass rate.
 
 ---
 
@@ -15,16 +15,28 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 
 ### 2.1 Component Mapping
 - **Client Tier**: React 18 SPA + Vite + TypeScript (Browser)
-- **API Gateway Tier**: FastAPI + Uvicorn (Python 3.12)
-- **Data Tier**: SQLite ORM (`phishing_detector.db`) + SQLAlchemy 2.0 with dynamic user scoping
+- **API Gateway Tier**: FastAPI + Uvicorn (Python 3.11+)
+- **Data Tier**: SQLite ORM (`phishing_detector.db`) + SQLAlchemy 2.0 with dynamic user scoping, `ThreatIndicator` table with indexed `indicator_hash` column, `ThreatFeedState` table
 - **External AI Tier**: Google Gemini 3.6 Flash (`models/gemini-3.6-flash` via `google-genai` Interactions API)
-- **External Intelligence Tier**: VirusTotal API & URLhaus Feed
+- **External Intelligence Tier**: VirusTotal API, URLhaus Threat Feed, Google Web Risk Lookup API, and local synchronized threat feeds (PhishTank, OpenPhish, MISP)
 
 ### 2.2 STRIDE Analysis
-### 2.3 Analysis Abuse Controls
-- `/api/analyze` enforces two independent fixed-window limits: **10 requests/minute** and **100 requests/day**.
-- Anonymous limiter identity is the stable client IP; the guest history cookie is not part of the limiter key.
-- Authenticated limiter identity is a SHA-256 digest of client IP + opaque session cookie; the raw session token is never returned in the key.
+### 2.3 Analysis Abuse & AI Gateway Controls (Gateway v1.2.1)
+- `/api/analyze` enforces two independent fixed-window limits: **10 requests/minute** (burst protection) and **100 requests/day** (daily expensive-analysis quota).
+- **Stable Account Quota**: The daily quota is keyed to the stable database user ID (`analysis-user:<sha256(user_id)>`) for authenticated users, precomputed during the ASGI request lifecycle onto `request.state` to avoid redundant database lookups.
+- **Fail-Closed Quota Semantics**: If an authenticated session is invalid, expired, or unresolvable, the gateway fails closed (HTTP 401/500) rather than silently degrading to an anonymous IP bucket.
+- **Anonymous Quota**: Anonymous requests are keyed to client IP (`ip:<client_ip>`), preventing guest-cookie rotation bypass.
+- **Burst Isolation**: Authenticated burst limiter identity is a SHA-256 digest of client IP + opaque session token (`session:<hash>`).
+- **Gemini No-Storage Mode**: The primary Interactions API explicitly specifies `store=False` on all analysis and key-verification requests to opt out of server-side data retention. The Generate Content compatibility fallback path is non-persistent by default in Google's API architecture. Raw prompts, raw completions, and raw third-party provider responses are excluded from logs and persistent storage.
+- **Sanitized History Preview & Header Privacy Boundary**: Application-level `ScanHistory` records retain only a sanitized, bounded 100-character preview of user input (with passwords, bearer tokens, API keys, and card numbers masked). For email header analysis, raw headers, raw subjects, raw sender strings, and raw Authentication-Results blocks are never persisted or returned; only structured, normalized domain identities, authentication flags, and urgent subject triggers are stored.
+- **Dynamic Prompt Boundary Integrity**: User inputs are treated as hostile untrusted data enclosed in dynamic, per-request high-entropy boundary tags (`<UNTRUSTED_INPUT boundary="...">`), preventing attackers from prematurely terminating boundaries with injected tags. Server-side baseline facts are isolated within `<TRUSTED_HEURISTICS boundary="...">`. The application enforces a strict heuristic score floor and server-derived status classification (defense-in-depth).
+- **Pydantic LLM Output Validation**: All provider outputs are strictly validated through `LlmPhishingAnalysisSchema` (0..100 score bounds, literal status and severity enums, bounded string lengths and signal counts) before consumption, with safe fallback on validation failures.
+- **Embedded URL Budget**: Email analysis bounds embedded URL processing to `MAX_EXTRACTED_URLS` (default: 25) before running heuristic or external intel checks, mitigating resource amplification.
+- **Bounded Provider Queue**: Concurrency slots for Gemini, VirusTotal, URLhaus, and Google Web Risk require acquiring semaphore permits within a bounded queue timeout (2.0s) before executing operations with independent hard timeouts (5.0s / 6.0s).
+- **Sanitized Provider Contracts**: VirusTotal, URLhaus, and Google Web Risk results are normalized into minimal public schemas; `raw_response`, internal headers, API keys, and raw exception messages are stripped.
+- **Upstream-Aware Cache Expiration**: Google Web Risk results are cached with an effective TTL strictly bounded by remaining upstream provider validity (`min(remaining_seconds, 600)`). Expired provider responses (remaining <= 0) receive TTL=0 and are never cached.
+- **Email Authentication Trust Boundary**: Header parser distinguishes parsed client metadata from cryptographically trusted gateway metadata via `TRUSTED_AUTHSERV_IDS`. DMARC SPF alignment strictly verifies `MAIL FROM` (not `HELO`), and DKIM alignment strictly verifies signing domain `d=` (not `i=`). Missing authentication is preserved as `none`/`unknown` without being penalized as `fail`.
+- **Deterministic Feed Aggregation**: Local threat intelligence feed normalizes URLs (scheme/host lowercasing, default-port stripping, query-parameter sorting, fragment removal) and UTC timestamps, enforcing deterministic severity precedence (`malware` > `c2` > `credential_harvesting` > `phishing` > `scam`) and an exact +35 risk boost invariant with zero duplicate multiplier stacking.
 - Production configuration requires `redis://` or `rediss://` rate-limit storage so quota state is shared across instances.
 
 - **Spoofing**: Mitigated via opaque, server-side session authentication with HttpOnly cookies (`backend/app/auth.py`) and bcrypt password hashing.
@@ -51,16 +63,22 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 
 ## 4. Verification Evidence & Test Execution
 
-```powershell
-============================= test session starts =============================
-platform win32 -- Python 3.12.5, pytest-9.1.1, pluggy-1.6.0
-rootdir: C:\Users\deysa\OneDrive\Documents\Ai phishing detector\backend
-plugins: anyio-4.13.0
-collected 11 items
+```bash
+============================= test session starts ==============================
+platform linux -- Python 3.11.2, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/user/AI-PHISHING-DETECTOR/backend
+plugins: platformdirs-4.12.3, anyio-4.15.1, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 114 items
 
-tests\test_security_hardening.py ...........                             [100%]
+test_backend.py ..                                                       [  1%]
+tests/test_email_auth.py ......................                          [ 21%]
+tests/test_security_hardening.py ....................................... [ 55%]
+......                                                                   [ 60%]
+tests/test_threat_feeds.py .............................                 [ 85%]
+tests/test_webrisk.py ................                                   [100%]
 
-============================= 11 passed in 7.88s ==============================
+======================= 114 passed, 3 warnings in 14.84s =======================
 ```
 
 ---
@@ -73,19 +91,19 @@ tests\test_security_hardening.py ...........                             [100%]
 | **2. Hide API Keys** | Implemented | `backend/app/config.py`, `.env` | VERIFIED |
 | **3. Test IDOR Attacks** | Implemented | `backend/app/main.py` (`/api/history/{scan_id}`) | VERIFIED (`test_idor_prevention`) |
 | **4. Scan for Git Secrets** | Implemented | `.gitignore` (excludes `.env`, `.db`, `*.key`) | VERIFIED |
-| **5. Lock Admin Routes** | Implemented | `backend/app/main.py` (`require_admin`) | VERIFIED (`test_admin_route_locking`) |
+| **5. Lock Admin Routes** | Implemented | `backend/app/main.py` (`require_admin`) | VERIFIED (`test_admin_route_locking`, `test_admin_threat_feed_endpoints_rbac`) |
 | **6. Test User Isolation** | Implemented | `backend/app/main.py` (`/api/history`) | VERIFIED (`test_user_data_isolation`) |
 | **7. Rate Limit APIs** | Implemented | `backend/app/main.py` (`SlowAPI` limiter) | VERIFIED |
 | **8. Lock Storage Buckets** | Not Applicable | No S3 / Cloud Blob storage in local stack | N/A |
 | **9. Validate All Inputs** | Implemented | `backend/app/models/schemas.py` (Pydantic models) | VERIFIED (`test_input_validation`) |
 | **10. Block Unauth Routes** | Implemented | `backend/app/auth.py` (`get_current_user`) | VERIFIED |
 | **11. Test SQL Injections** | Implemented | `backend/app/db.py` (SQLAlchemy ORM) | VERIFIED (`test_sql_injection_defense`) |
-| **12. Remove Sensitive Logs** | Implemented | `backend/app/main.py` (`SensitiveLogFilter`) | VERIFIED (`test_log_redaction`) |
+| **12. Remove Sensitive Logs** | Implemented | `backend/app/main.py` (`SensitiveLogFilter`) | VERIFIED (`test_log_redaction`, `test_webrisk_log_redaction`) |
 | **13. Block Field Tampering** | Implemented | `backend/app/main.py` (`register` body handling) | VERIFIED (`test_parameter_tampering_prevention`) |
 | **14. Restrict Uploads** | Not Applicable | No direct file uploads enabled on Gateway | N/A |
-| **15. Secure Server Logic** | Implemented | `backend/app/services/llm_service.py` (Gemini 3.6 Flash) | VERIFIED |
-| **16. Trim API Responses** | Implemented | `backend/app/models/schemas.py` (`UserOut`) | VERIFIED |
-| **17. Secure Auth Sessions** | Implemented | `backend/app/auth.py` (JWT HS256, bcrypt) | VERIFIED (`test_user_registration_and_login`) |
-| **18. Scan Dependencies** | Implemented | `npm audit` & `pip` package verification | VERIFIED |
+| **15. Secure Server Logic** | Implemented | `backend/app/services/llm_service.py`, `backend/app/services/webrisk_service.py`, `backend/app/services/email_auth_service.py`, `backend/app/services/threat_feed_service.py` | VERIFIED |
+| **16. Trim API Responses** | Implemented | `backend/app/models/schemas.py` (`UserOut`, `AnalysisResponse`, `ThreatFeedStateOut`) | VERIFIED |
+| **17. Secure Auth Sessions** | Implemented | `backend/app/auth.py` (Opaque Session Cookies, bcrypt) | VERIFIED (`test_user_registration_and_login`) |
+| **18. Scan Dependencies** | Implemented | `npm audit` & `pip-audit` package verification | VERIFIED |
 | **19. Test Record Access** | Implemented | `backend/app/main.py` (`delete_history`) | VERIFIED (`test_scoped_history_bulk_clear`) |
-| **20. Attack Your Own App** | Implemented | `backend/tests/test_security_hardening.py` | VERIFIED (11/11 Passed) |
+| **20. Attack Your Own App** | Implemented | `backend/tests/` (114 test specifications) | VERIFIED (114/114 Passed) |

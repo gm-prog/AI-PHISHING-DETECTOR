@@ -30,9 +30,11 @@ class Settings:
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development").lower()
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     VIRUSTOTAL_API_KEY: str = os.getenv("VIRUSTOTAL_API_KEY", "")
+    GOOGLE_WEB_RISK_API_KEY: str = os.getenv("GOOGLE_WEB_RISK_API_KEY", "")
     ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", LOCAL_ORIGINS)
     LLM_MAX_INPUT_CHARS: int = int(os.getenv("LLM_MAX_INPUT_CHARS", "12000"))
     MAX_REQUEST_BODY_BYTES: int = int(os.getenv("MAX_REQUEST_BODY_BYTES", "65536"))
+    MAX_EXTRACTED_URLS: int = int(os.getenv("MAX_EXTRACTED_URLS", "25"))
     RATE_LIMIT_STORAGE_URI: str = os.getenv("RATE_LIMIT_STORAGE_URI", "memory://").strip()
 
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
@@ -43,8 +45,29 @@ class Settings:
     AUTH_COOKIE_SECURE: bool = os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
     AUTH_COOKIE_SAMESITE: str = os.getenv("AUTH_COOKIE_SAMESITE", "lax").lower()
 
+    # Comma-separated list of trusted Authentication-Results authserv-id hostnames/domains
+    TRUSTED_AUTHSERV_IDS: str = os.getenv("TRUSTED_AUTHSERV_IDS", "")
+
+    # Threat Intelligence Feed Ingestion Settings
+    PHISHTANK_API_KEY: str = os.getenv("PHISHTANK_API_KEY", "")
+    PHISHTANK_FEED_URL: str = os.getenv("PHISHTANK_FEED_URL", "http://data.phishtank.com/data/online-valid.json.bz2")
+    OPENPHISH_FEED_URL: str = os.getenv("OPENPHISH_FEED_URL", "https://openphish.com/feed.txt")
+    MISP_SERVER_URL: str = os.getenv("MISP_SERVER_URL", "")
+    MISP_API_KEY: str = os.getenv("MISP_API_KEY", "")
+    THREAT_FEED_MAX_RECORDS: int = int(os.getenv("THREAT_FEED_MAX_RECORDS", "10000"))
+    THREAT_FEED_MAX_RESPONSE_BYTES: int = int(os.getenv("THREAT_FEED_MAX_RESPONSE_BYTES", "33554432"))  # 32MB max
+    THREAT_FEED_MAX_DECOMPRESSED_BYTES: int = int(os.getenv("THREAT_FEED_MAX_DECOMPRESSED_BYTES", "67108864"))  # 64MB max decompressed
+    THREAT_FEED_TIMEOUT_SECONDS: float = float(os.getenv("THREAT_FEED_TIMEOUT_SECONDS", "10.0"))
+    THREAT_FEED_MAX_CONCURRENT_FETCHES: int = int(os.getenv("THREAT_FEED_MAX_CONCURRENT_FETCHES", "2"))
+
     HOST: str = os.getenv("HOST", "127.0.0.1")
     PORT: int = int(os.getenv("PORT", "8000"))
+
+    @property
+    def trusted_authserv_ids_set(self) -> set[str]:
+        if not self.TRUSTED_AUTHSERV_IDS:
+            return set()
+        return {x.strip().lower() for x in self.TRUSTED_AUTHSERV_IDS.split(",") if x.strip()}
 
 
 settings = Settings()

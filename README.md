@@ -22,22 +22,31 @@ An advanced full-stack AI-powered phishing detector that inspects URLs, email bo
 Ai phishing detector/
 ├── backend/                  # FastAPI Python backend
 │   ├── app/
-│   │   ├── main.py           # API routes and report generation
+│   │   ├── main.py           # API routes, rate limiting, and orchestration
 │   │   ├── config.py         # Environment configuration
 │   │   ├── models/
+│   │   │   ├── domain.py     # SQLAlchemy models (User, ScanHistory, ThreatIndicator)
 │   │   │   └── schemas.py    # Pydantic request/response models
 │   │   └── services/
-│   │       ├── url_service.py    # URL heuristic analyzer
-│   │       ├── email_service.py  # Email text + header analyzer
-│   │       └── llm_service.py    # Gemini AI integration
+│   │       ├── url_service.py         # URL heuristic analyzer
+│   │       ├── email_service.py       # Email text + header analyzer
+│   │       ├── email_auth_service.py  # Standards-aware SPF/DKIM/DMARC parser
+│   │       ├── webrisk_service.py     # Google Web Risk Lookup API provider
+│   │       ├── threat_feed_service.py # Normalized threat feed layer & lookup
+│   │       ├── provider_guard.py      # Provider concurrency & TTL caches
+│   │       └── llm_service.py         # Gemini AI integration
 │   ├── requirements.txt
 │   ├── .env                  # API key configuration
-│   └── test_backend.py       # Standalone backend test script
+│   └── tests/                # Test suite (114 passed specifications)
+│       ├── test_security_hardening.py # Gateway v1.2 security tests
+│       ├── test_webrisk.py            # Web Risk provider tests
+│       ├── test_email_auth.py         # Email auth parser tests
+│       └── test_threat_feeds.py       # Threat feed layer tests
 │
 └── frontend/                 # React + Vite + TypeScript frontend
     ├── src/
     │   ├── App.tsx            # Main application layout
-    │   ├── components/        # UI components
+    │   ├── components/        # UI components (SignalList, ThreatRadar, History)
     │   ├── types.ts           # TypeScript type definitions
     │   └── mockData.ts        # Quick-test sample payloads
     └── package.json
@@ -58,6 +67,9 @@ cd backend
 
 # Install / verify dependencies
 pip install -r requirements.txt
+
+# Run authoritative database schema migrations
+alembic upgrade head
 
 # Start the API server
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
@@ -82,30 +94,47 @@ The frontend will be running at: `http://localhost:5173`
 
 ---
 
-## 🔑 Gemini AI Setup (Optional)
+## 🔑 Gemini AI & Threat Intelligence Setup (Optional)
 
-The detector works fully offline with its heuristic engine. To enable AI-powered reports:
+The detector works fully offline with its autonomous heuristic engine. To enable server-side AI-powered semantic threat analysis and external threat feeds:
 
-1. Get a free API key from [Google AI Studio](https://aistudio.google.com/)
-2. Either:
-   - Set `GEMINI_API_KEY=your_key_here` in `backend/.env`, OR
-   - Enter it in the app's **Settings** modal (gear icon in the top-right)
+1. **Google Gemini AI**: Get an API key from [Google AI Studio](https://aistudio.google.com/) and set `GEMINI_API_KEY=your_key_here` in `backend/.env`.
+2. **Google Web Risk**: Get an API key from [Google Cloud Console](https://console.cloud.google.com/) (Web Risk API) and set `GOOGLE_WEB_RISK_API_KEY=your_key_here` in `backend/.env`.
+3. **VirusTotal**: Set `VIRUSTOTAL_API_KEY=your_key_here` in `backend/.env`.
+4. **URLhaus**: No API key required; automated bounded lookups are enabled by default for URL analysis.
+5. **PhishTank Feed**: (Implemented connector) Set `PHISHTANK_API_KEY=your_key_here` in `backend/.env` (optional; feed works without key or with application key).
+6. **OpenPhish Feed**: (Implemented connector) Enabled by default via community feed (`https://openphish.com/feed.txt`).
+7. **MISP Threat Sharing**: (Configurable adapter) Set `MISP_SERVER_URL=https://misp.your-org.local` and `MISP_API_KEY=your_key_here` in `backend/.env` (disabled if unconfigured).
+
+All keys are server-side only and never leaked to frontend clients or persisted in logs.
 
 ---
 
 ## 📡 API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/health` | Backend health status |
-| `POST` | `/api/analyze` | Analyze a URL, email body, or headers |
-| `POST` | `/api/verify-key` | Validate a Gemini API key |
+| Method | Endpoint | Access Control | Description |
+|--------|----------|----------------|-------------|
+| `GET` | `/api/health` | Public | Backend health telemetry |
+| `POST` | `/api/auth/register` | Public (5/min) | Account registration with HttpOnly session |
+| `POST` | `/api/auth/login` | Public (5/min) | Authentication with HttpOnly session |
+| `POST` | `/api/auth/logout` | Public/Auth | Session revocation and cookie clearance |
+| `GET` | `/api/auth/me` | Authenticated | Profile of current authenticated user |
+| `POST` | `/api/analyze` | Public / Auth (10/min + 100/day) | Threat vector analysis (URL, email body, headers) |
+| `GET` | `/api/history` | User / Guest Scoped | Retrieve scoped scan history |
+| `GET` | `/api/history/{scan_id}` | Owner / Admin Scoped | Single scan threat report (IDOR protected) |
+| `DELETE` | `/api/history/{scan_id}` | Owner / Admin Scoped | Delete single scan record |
+| `DELETE` | `/api/history` | User / Guest Scoped | Bulk clear history for current session |
+| `GET` | `/api/admin/metrics` | Admin RBAC | Platform-wide aggregation metrics |
+| `GET` | `/api/admin/scans` | Admin RBAC | Global scan audit log |
+| `GET` | `/api/admin/threat-feeds` | Admin RBAC | Sanitized sync status and freshness of threat feeds |
+| `POST` | `/api/admin/threat-feeds/{source}/refresh` | Admin RBAC (5/min, CSRF) | Trigger manual atomic refresh for registered feed provider |
 
 ### Example: Analyze a URL
 
 ```bash
 curl -X POST http://localhost:8000/api/analyze \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <token>" \
   -d '{"input_type": "url", "content": "http://paypa1-verification.xyz/login"}'
 ```
 
@@ -113,9 +142,9 @@ curl -X POST http://localhost:8000/api/analyze \
 
 ## 🧪 Running the Backend Test Suite
 
-```powershell
-cd backend
-.\venv\Scripts\python.exe test_backend.py
+```bash
+PYTHONPATH=backend pytest backend/tests
+```
 ```
 
 ---

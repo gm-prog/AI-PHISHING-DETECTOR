@@ -2,8 +2,10 @@ import uuid
 import hashlib
 import asyncio
 import secrets
+import inspect
 import re
 import logging
+from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -18,7 +20,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from app.config import settings, parse_allowed_origins
-from app.db import engine, Base, get_db
+from app.db import engine, Base, get_db, verify_schema_invariants
 from app.models.domain import User, ScanHistory
 from app.models.schemas import (
     AnalysisRequest,
@@ -35,6 +37,7 @@ from app.auth import (
     verify_password,
     get_current_user,
     get_optional_current_user,
+    get_user_id_from_session,
     require_admin,
     create_user_session,
     revoke_session,
@@ -45,21 +48,28 @@ from app.services.email_service import analyze_email_text, analyze_email_headers
 from app.services.llm_service import analyze_with_llm
 from app.services.virustotal_service import analyze_url_with_virustotal
 from app.services.urlhaus_service import check_url_with_urlhaus
+from app.services.webrisk_service import check_url_with_webrisk
+from app.services.threat_feed_service import (
+    lookup_threat_indicator,
+    get_registered_providers,
+    get_all_feed_states,
+    refresh_threat_feed,
+)
 from app.services.provider_guard import (
     llm_cache,
     virustotal_cache,
     urlhaus_cache,
+    webrisk_cache,
     llm_semaphore,
     virustotal_semaphore,
     urlhaus_semaphore,
+    webrisk_semaphore,
     stable_key,
     run_bounded,
+    ProviderQueueExhaustedError,
 )
 
 from datetime import datetime, timezone
-
-# Ensure database tables exist
-Base.metadata.create_all(bind=engine)
 
 # ================= SENSITIVE LOG REDACTION FILTER =================
 class SensitiveLogFilter(logging.Filter):
@@ -97,11 +107,125 @@ def security_rate_limit_key(request: Request) -> str:
         ).hexdigest()
     return "ip:" + client_ip
 
+
+_SECRET_PATTERNS = [
+    # Authorization header / Bearer token
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-\.]{15,}"), "Bearer [MASKED]"),
+    (re.compile(r"(?i)authorization:\s*[^\r\n]+"), "Authorization: [MASKED]"),
+    # Common password assignments
+    (re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*[^\s&;]+"), r"\1=[MASKED]"),
+    # Common token / API key assignments
+    (re.compile(r"(?i)(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret)\s*[:=]\s*[^\s&;]+"), r"\1=[MASKED]"),
+    # Google API Key pattern
+    (re.compile(r"AIzaSy[A-Za-z0-9_\-]{10,}"), "AIzaSy...[MASKED]"),
+    # JWT-like pattern (header.payload.signature)
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_\-]{10,}"), "[MASKED_JWT]"),
+    # Credit card / PAN-like sequences (13-19 digits with optional spaces/dashes)
+    (re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[MASKED_CARD]"),
+    # Generic credential assignment with long value (24+ characters)
+    (re.compile(r"(?i)(key|token|secret|session)[=:]\s*([a-zA-Z0-9_\-]{24,})"), r"\1=[MASKED]"),
+]
+
+
+def sanitize_history_preview(content: str, max_chars: int = 100) -> str:
+    """
+    Sanitizes user input for persistent ScanHistory preview storage.
+    Masks credentials, API keys, passwords, bearer tokens, and payment card numbers
+    while preserving benign contextual text for dashboard display, capped at max_chars.
+    """
+    if not content:
+        return ""
+
+    sanitized = content.strip()
+    for pattern, repl in _SECRET_PATTERNS:
+        sanitized = pattern.sub(repl, sanitized)
+
+    # Collapse multiple whitespaces/newlines for clean single-line preview
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+
+    if len(sanitized) > max_chars:
+        return sanitized[:max_chars] + "..."
+    return sanitized
+
+
+def security_daily_analysis_quota_key(request: Request) -> str:
+    """
+    Stable account-level rate limit key for the daily expensive-analysis quota.
+    - Authenticated: derived from stable db user_id (analysis-user:<sha256(user_id)>),
+      resolved once during request pipeline onto request.state.
+    - Anonymous: derived from client IP (ip:<client_ip>), matching the anonymous burst limiter.
+      Guest cookie rotation cannot reset this bucket.
+    """
+    # 1. Fast path: Read pre-resolved quota identity from request.state (0 DB calls in limiter)
+    precomputed = getattr(request.state, "analysis_quota_key", None)
+    if precomputed:
+        return precomputed
+
+    # If the request presented an authenticated session cookie but resolution failed,
+    # fail-closed to prevent silent downgrade to an IP quota bucket.
+    if getattr(request.state, "auth_resolution_error", None):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials or session expired.",
+        )
+
+    # 2. Fallback for direct invocations / standalone tests without ASGI middleware pipeline
+    session_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if session_token:
+        user_id = None
+        try:
+            db_factory = app.dependency_overrides.get(get_db, get_db)
+            gen = db_factory()
+            if inspect.isgenerator(gen):
+                try:
+                    db = next(gen)
+                    user_id = get_user_id_from_session(session_token, db)
+                finally:
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+            elif hasattr(gen, "__enter__"):
+                with gen as db:
+                    user_id = get_user_id_from_session(session_token, db)
+            else:
+                user_id = get_user_id_from_session(session_token, gen)
+                if hasattr(gen, "close"):
+                    gen.close()
+        except Exception:
+            logger.warning("event=auth_context_resolution_failed")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Unable to resolve authenticated quota identity.",
+            )
+
+        if user_id:
+            user_hash = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()
+            return f"analysis-user:{user_hash}"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials or session expired.",
+            )
+
+    client_ip = get_remote_address(request)
+    return f"ip:{client_ip}"
+
 limiter = Limiter(
     key_func=security_rate_limit_key,
     storage_uri=settings.RATE_LIMIT_STORAGE_URI,
     strategy="fixed-window",
 )
+
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    """
+    Validates that the database schema is fully initialized and matches required invariants.
+    Fails closed if the database is unmigrated, missing tables/columns, or incompatible.
+    """
+    verify_schema_invariants()
+    yield
+
 
 app = FastAPI(
     title="SENTINEL AI — Threat Intelligence API",
@@ -110,9 +234,11 @@ app = FastAPI(
     docs_url=None if settings.ENVIRONMENT == "production" else "/docs",
     redoc_url=None if settings.ENVIRONMENT == "production" else "/redoc",
     openapi_url=None if settings.ENVIRONMENT == "production" else "/openapi.json",
+    lifespan=lifespan,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 MAX_REQUEST_BODY_BYTES = settings.MAX_REQUEST_BODY_BYTES
 
@@ -204,6 +330,46 @@ def _set_auth_cookies(response: Response, session_token: str) -> None:
 def _clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(settings.AUTH_COOKIE_NAME, path="/")
     response.delete_cookie(settings.CSRF_COOKIE_NAME, path="/")
+
+@app.middleware("http")
+async def auth_context_middleware(request: Request, call_next):
+    """
+    Resolves session authentication once per request lifecycle, precomputing the stable
+    account quota identity on request.state before route handlers or SlowAPI rate limiting run.
+    """
+    session_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if session_token:
+        try:
+            db_factory = app.dependency_overrides.get(get_db, get_db)
+            gen = db_factory()
+            if inspect.isgenerator(gen):
+                try:
+                    db = next(gen)
+                    user_id = get_user_id_from_session(session_token, db)
+                finally:
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+            elif hasattr(gen, "__enter__"):
+                with gen as db:
+                    user_id = get_user_id_from_session(session_token, db)
+            else:
+                user_id = get_user_id_from_session(session_token, gen)
+                if hasattr(gen, "close"):
+                    gen.close()
+
+            if user_id:
+                request.state.auth_user_id = user_id
+                user_hash = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()
+                request.state.analysis_quota_key = f"analysis-user:{user_hash}"
+            else:
+                request.state.auth_resolution_error = "invalid_or_expired_session"
+        except Exception:
+            logger.warning("event=auth_context_resolution_failed")
+            request.state.auth_resolution_error = "db_resolution_error"
+
+    return await call_next(request)
 
 @app.middleware("http")
 async def csrf_protection(request: Request, call_next):
@@ -467,10 +633,44 @@ def get_all_scans_admin(
     } for r in records]
 
 
+@app.get("/api/admin/threat-feeds")
+def get_threat_feeds_status_admin(
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin-only endpoint returning sanitized threat feed sync status and freshness."""
+    return {"sources": get_all_feed_states(db)}
+
+
+@app.post("/api/admin/threat-feeds/{source}/refresh")
+@limiter.limit("5/minute")
+async def manual_threat_feed_refresh_admin(
+    request: Request,
+    source: str,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin-only endpoint to trigger a manual, atomic feed refresh for a registered provider.
+    Protected against CSRF and SSRF: only server-side registered sources are accepted.
+    """
+    providers = get_registered_providers()
+    clean_source = source.strip().lower()
+    if clean_source not in providers:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Threat feed source '{source}' is not a registered provider."
+        )
+
+    provider = providers[clean_source]
+    res = await refresh_threat_feed(db, provider)
+    return res
+
+
 # ================= CORE THREAT SCANNER ENDPOINT =================
 @app.post("/api/analyze", response_model=AnalysisResponse)
-@limiter.limit("100/day")
-@limiter.limit("10/minute")
+@limiter.limit("100/day", key_func=security_daily_analysis_quota_key)
+@limiter.limit("10/minute", key_func=security_rate_limit_key)
 async def analyze_input(
     request: Request,
     response: Response,
@@ -500,8 +700,8 @@ async def analyze_input(
         heuristic_signals = res["signals"]
         technical_details = res["details"]
 
-    except Exception as e:
-        logger.error(f"Heuristic engine execution error: {str(e)}")
+    except Exception:
+        logger.error("event=heuristic_engine_execution_failed")
         raise HTTPException(
             status_code=500,
             detail="An error occurred while analyzing the threat vectors."
@@ -514,27 +714,57 @@ async def analyze_input(
     elif heuristic_score >= 30:
         status_label = "warning"
 
-    # 3. External Threat Intelligence (URLs only)
+    # 3. External Threat Intelligence & Local Threat Feeds (URLs only)
+    local_feed_data: Optional[Dict[str, Any]] = None
     vt_data: Optional[Dict[str, Any]] = None
     uh_data: Optional[Dict[str, Any]] = None
+    wr_data: Optional[Dict[str, Any]] = None
     vt_status: Optional[str] = None
     uh_status: Optional[str] = None
+    wr_status: Optional[str] = None
 
     if input_type == "url":
+        # Local Threat Feed Lookup (O(1) indexed lookup)
+        try:
+            local_feed_data = lookup_threat_indicator(db, "url", content.strip())
+            if local_feed_data and local_feed_data.get("is_match"):
+                heuristic_score = min(100, heuristic_score + 35)
+                sources_str = local_feed_data.get("sources_summary", "local_feed")
+                classification_str = local_feed_data.get("classification", "phishing")
+                observed_str = local_feed_data.get("observed_at", "")
+                heuristic_signals.append({
+                    "id": "threat_feed_match",
+                    "severity": "high",
+                    "title": f"Threat Intelligence Feed Match: {classification_str.upper()}",
+                    "description": f"Indicator flagged by synchronized threat intelligence feed (Source: {sources_str}, Classification: {classification_str}, Observed: {observed_str}).",
+                })
+        except Exception:
+            logger.error("provider=threat_feed event=lookup_error", exc_info=False)
+
         # VirusTotal Integration
         try:
             vt_cache_key = stable_key("virustotal", content.strip())
             vt_data = await virustotal_cache.get(vt_cache_key)
             if vt_data is None:
-                vt_data = await run_bounded(analyze_url_with_virustotal(content, settings.VIRUSTOTAL_API_KEY), virustotal_semaphore, 6.0)
+                vt_data = await run_bounded(
+                    analyze_url_with_virustotal(content, settings.VIRUSTOTAL_API_KEY),
+                    virustotal_semaphore,
+                    timeout_seconds=6.0,
+                    acquire_timeout_seconds=2.0,
+                )
                 await virustotal_cache.set(vt_cache_key, vt_data)
-            vt_status = vt_data.get("status")
+            vt_status = vt_data.get("status") if vt_data else "error"
             if vt_status == "success" and vt_data.get("malicious_count", 0) > 0:
                 boost = min(30, vt_data["malicious_count"] * 5)
                 heuristic_score = min(100, heuristic_score + boost)
+        except ProviderQueueExhaustedError:
+            logger.warning("provider=virustotal event=queue_exhausted")
+            vt_status = "provider_unavailable"
         except asyncio.TimeoutError:
+            logger.warning("provider=virustotal event=timeout")
             vt_status = "timeout"
         except Exception:
+            logger.error("provider=virustotal event=unexpected_error")
             vt_status = "error"
 
         # URLhaus Integration
@@ -542,16 +772,60 @@ async def analyze_input(
             uh_cache_key = stable_key("urlhaus", content.strip())
             uh_data = await urlhaus_cache.get(uh_cache_key)
             if uh_data is None:
-                uh_data = await run_bounded(check_url_with_urlhaus(content), urlhaus_semaphore, 5.0)
+                uh_data = await run_bounded(
+                    check_url_with_urlhaus(content),
+                    urlhaus_semaphore,
+                    timeout_seconds=5.0,
+                    acquire_timeout_seconds=2.0,
+                )
                 await urlhaus_cache.set(uh_cache_key, uh_data)
-            uh_status = uh_data.get("status")
+            uh_status = uh_data.get("status") if uh_data else "error"
             if uh_status == "success" and uh_data.get("in_database"):
                 boost = 25
                 heuristic_score = min(100, heuristic_score + boost)
+        except ProviderQueueExhaustedError:
+            logger.warning("provider=urlhaus event=queue_exhausted")
+            uh_status = "provider_unavailable"
         except asyncio.TimeoutError:
+            logger.warning("provider=urlhaus event=timeout")
             uh_status = "timeout"
         except Exception:
+            logger.error("provider=urlhaus event=unexpected_error")
             uh_status = "error"
+
+        # Google Web Risk Integration
+        try:
+            wr_cache_key = stable_key("webrisk", content.strip())
+            wr_data = await webrisk_cache.get(wr_cache_key)
+            if wr_data is None:
+                wr_data = await run_bounded(
+                    check_url_with_webrisk(content, settings.GOOGLE_WEB_RISK_API_KEY),
+                    webrisk_semaphore,
+                    timeout_seconds=5.0,
+                    acquire_timeout_seconds=2.0,
+                )
+                wr_ttl = wr_data.get("cache_ttl_seconds") if isinstance(wr_data, dict) else None
+                await webrisk_cache.set(wr_cache_key, wr_data, ttl_seconds=wr_ttl)
+            wr_status = wr_data.get("status") if wr_data else "error"
+            if wr_status == "success" and wr_data.get("in_database"):
+                # Google Web Risk match -> +30 risk points (capped at +30 once)
+                heuristic_score = min(100, heuristic_score + 30)
+                threat_list = ", ".join(wr_data.get("threat_types", [])) or "THREAT_UNSPECIFIED"
+                heuristic_signals.append({
+                    "id": "webrisk_threat_match",
+                    "severity": "high",
+                    "title": f"Google Web Risk Flagged: {threat_list}",
+                    "description": f"Google Web Risk database classifies this resource as unsafe ({threat_list}).",
+                })
+        except ProviderQueueExhaustedError:
+            logger.warning("provider=webrisk event=queue_exhausted")
+            wr_status = "provider_unavailable"
+        except asyncio.TimeoutError:
+            logger.warning("provider=webrisk event=timeout")
+            wr_status = "timeout"
+        except Exception:
+            logger.error("provider=webrisk event=unexpected_error")
+            wr_status = "error"
 
         # Update status classification after intel boosts
         if heuristic_score >= 70:
@@ -591,13 +865,13 @@ async def analyze_input(
             signals=heuristic_signals
         )
 
-    # 5. Persist to Database with User Scoping (RLS/Isolation)
+    # 5. Persist to Database with User Scoping (RLS/Isolation) and Sanitized History Preview
     user_id = current_user.id if current_user else None
     guest_session_hash = None
     if current_user is None:
         guest_token = _get_or_create_guest_token(request, response)
         guest_session_hash = _guest_session_hash(guest_token)
-    snippet = content[:100] + "..." if len(content) > 100 else content
+    snippet = sanitize_history_preview(content, max_chars=100)
 
     db_record = ScanHistory(
         id=str(uuid.uuid4()),
@@ -615,13 +889,35 @@ async def analyze_input(
     try:
         db.add(db_record)
         db.commit()
-    except Exception as e:
-        logger.error(f"Scan persistence error: {e}")
+    except Exception:
+        logger.error("event=scan_persistence_failed")
         db.rollback()
 
     logger.info(f"[SCAN] user={user_id or 'anon'} type={input_type} score={final_score} status={final_status}")
 
-    # 6. Return Trimmed Response
+    # 6. Return Trimmed Response with Sanitized Contracts
+    vt_findings = {
+        "status": vt_data.get("status", "error"),
+        "malicious_count": int(vt_data.get("malicious_count", 0)),
+        "suspicious_count": int(vt_data.get("suspicious_count", 0)),
+        "reputation_score": int(vt_data.get("reputation_score", 50)),
+        "vendors": list(vt_data.get("vendors", [])),
+    } if (vt_status == "success" and vt_data) else None
+
+    uh_findings = {
+        "status": uh_data.get("status", "error"),
+        "in_database": bool(uh_data.get("in_database", False)),
+        "threat_type": uh_data.get("threat_type"),
+        "date_added": str(uh_data.get("date_added", "")),
+        "malware_families": list(uh_data.get("malware_families", [])),
+    } if (uh_status == "success" and uh_data) else None
+
+    wr_findings = {
+        "status": wr_data.get("status", "error"),
+        "in_database": bool(wr_data.get("in_database", False)),
+        "threat_types": list(wr_data.get("threat_types", [])),
+    } if (wr_status == "success" and wr_data) else None
+
     return AnalysisResponse(
         input_type=input_type,
         risk_score=final_score,
@@ -629,14 +925,19 @@ async def analyze_input(
         phishing_signals=final_signals,
         ai_explanation=ai_explanation,
         details=technical_details,
-        virustotal_findings=vt_data if vt_status == "success" else None,
+        virustotal_findings=vt_findings,
         vt_status=vt_status,
         vt_malicious_vendors=vt_data.get("malicious_count") if vt_status == "success" and vt_data else None,
         vt_reputation=vt_data.get("reputation_score") if vt_status == "success" and vt_data else None,
-        urlhaus_findings=uh_data if uh_status == "success" else None,
+        urlhaus_findings=uh_findings,
         urlhaus_status=uh_status,
         urlhaus_threat_type=uh_data.get("threat_type") if uh_status == "success" and uh_data else None,
         urlhaus_in_database=uh_data.get("in_database") if uh_status == "success" and uh_data else None,
+        webrisk_findings=wr_findings,
+        webrisk_status=wr_status,
+        webrisk_threat_types=wr_data.get("threat_types") if wr_status == "success" and wr_data else None,
+        webrisk_in_database=wr_data.get("in_database") if wr_status == "success" and wr_data else None,
+        local_feed_findings=local_feed_data,
     )
 
 

@@ -1,8 +1,10 @@
 import re
 from email.parser import HeaderParser
 from urllib.parse import urlparse
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+from app.config import settings
 from app.services.url_service import analyze_url
+from app.services.email_auth_service import parse_email_authentication, extract_domain
 
 # Keywords indicating urgency, fear, or financial pressure typical in phishing
 PHISHING_KEYWORDS = {
@@ -16,19 +18,40 @@ PHISHING_KEYWORDS = {
     r"\bsecure\b.{0,150}\blogin\b": ("medium", 20, "Security Portal Reference", "Promises a 'secure' login page, which is frequently the label of a credential harvester.")
 }
 
-def extract_urls(text: str) -> List[str]:
-    """Extracts all URLs from a string block using regex."""
+def extract_bounded_urls(text: str, max_urls: int = 25) -> Tuple[List[str], bool, int]:
+    """
+    Extracts unique standardized URLs from a string block up to max_urls without unbounded memory accumulation.
+    Returns (urls, was_truncated, total_found_estimate).
+    """
     url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+'
-    urls = re.findall(url_pattern, text)
+    seen = set()
     standardized = []
-    for u in urls:
-        if u.startswith('www.'):
-            standardized.append('http://' + u)
-        else:
-            standardized.append(u)
-    return list(set(standardized))
+    total_found = 0
+    was_truncated = False
 
-def analyze_email_text(text: str) -> Dict[str, Any]:
+    for match in re.finditer(url_pattern, text):
+        raw = match.group(0)
+        u = 'http://' + raw if raw.startswith('www.') else raw
+        if u not in seen:
+            seen.add(u)
+            if len(standardized) < max_urls:
+                standardized.append(u)
+            else:
+                was_truncated = True
+                total_found += 1
+                if total_found >= 1000:
+                    break
+
+    total_count = len(standardized) + total_found
+    return standardized, was_truncated, total_count
+
+def extract_urls(text: str, max_urls: Optional[int] = None) -> List[str]:
+    """Extracts unique URLs from a string block up to max_urls (defaults to settings.MAX_EXTRACTED_URLS)."""
+    limit = max_urls if max_urls is not None else settings.MAX_EXTRACTED_URLS
+    urls, _, _ = extract_bounded_urls(text, max_urls=limit)
+    return urls
+
+def analyze_email_text(text: str, max_urls: Optional[int] = None) -> Dict[str, Any]:
     """
     Analyzes email body text for keywords and embedded URLs using weighted scoring rules.
     """
@@ -52,8 +75,9 @@ def analyze_email_text(text: str) -> Dict[str, Any]:
                 "description": desc
             })
             
-    # 2. Extract and analyze nested URLs
-    urls = extract_urls(text)
+    # 2. Extract and analyze nested URLs within configured budget
+    limit = max_urls if max_urls is not None else settings.MAX_EXTRACTED_URLS
+    urls, links_truncated, total_links_count = extract_bounded_urls(text, max_urls=limit)
     nested_analyses = []
     high_risk_urls_count = 0
     link_score_acc = 0
@@ -106,6 +130,8 @@ def analyze_email_text(text: str) -> Dict[str, Any]:
         "signals": signals,
         "details": {
             "links_found": urls,
+            "links_analyzed": len(urls),
+            "links_truncated": links_truncated,
             "links_analysis": nested_analyses,
             "keyword_flags_count": len(signals) - len(nested_analyses)
         }
@@ -118,161 +144,184 @@ def extract_domain_from_email(email_str: str) -> str:
         return match.group(1).lower()
     return ""
 
-def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
+def analyze_email_headers(raw_headers: str, evidence_provenance: str = "untrusted_message") -> Dict[str, Any]:
     """
-    Parses email headers and checks SPF, DKIM, and From/Return-Path sender mismatches using weighted metrics.
+    Parses email headers and performs standards-aware SPF, DKIM, DMARC, and domain alignment verification.
+    Scoring is strictly trust-aware: untrusted claims from raw user-uploaded headers cannot trigger authoritative failure penalties.
+    Sanitizes all outputs: raw header blocks and raw PII strings are never retained in details.
     """
     signals = []
     base_risk = 0
-    
-    parser = HeaderParser()
-    headers = parser.parsestr(raw_headers)
-    headers_dict = {key.lower(): val for key, val in headers.items()}
-    
-    from_header = headers_dict.get("from", "")
-    return_path = headers_dict.get("return-path", "")
-    subject = headers_dict.get("subject", "")
-    auth_results = headers_dict.get("authentication-results", "")
-    spf_header = headers_dict.get("received-spf", "")
-    dkim_signature = headers_dict.get("dkim-signature", "")
-    
+
+    auth = parse_email_authentication(raw_headers, evidence_provenance=evidence_provenance)
+
+    dkim_display_status = (
+        auth.dkim.status
+        if auth.dkim.status != "unknown"
+        else ("signed" if auth.dkim.is_signed else "none")
+    )
+
+    # 1. Subject line urgency evaluation (privacy-preserving: detect flag without persisting raw text)
+    urgent_flags: List[str] = []
+    try:
+        parser = HeaderParser()
+        parsed = parser.parsestr(raw_headers)
+        raw_subject = parsed.get("Subject", "")
+        if raw_subject:
+            subject_lower = raw_subject.lower()
+            urgent_words = ["urgent", "action required", "suspended", "notice", "alert", "security update"]
+            for word in urgent_words:
+                if word in subject_lower:
+                    urgent_flags.append(word)
+                    base_risk += 15
+                    signals.append({
+                        "id": f"subject_urgent_{word.replace(' ', '_')}",
+                        "severity": "medium",
+                        "title": f"Urgent Topic in Subject ({word.capitalize()})",
+                        "description": f"The email subject line uses the trigger word '{word}' to induce stress and fast clicking.",
+                    })
+                    break
+    except Exception:
+        logger.debug("event=subject_urgency_parse_suppressed", exc_info=False)
+
     details = {
-        "from": from_header,
-        "return_path": return_path,
-        "subject": subject,
-        "spf_status": "unknown",
-        "dkim_status": "unknown"
+        "from_domain": auth.alignment.from_domain,
+        "from_registered_domain": auth.alignment.from_registered_domain,
+        "return_path_domain": auth.alignment.return_path_domain,
+        "return_path_registered_domain": auth.alignment.return_path_registered_domain,
+        "spf_mailfrom_domain": auth.alignment.spf_mailfrom_domain,
+        "spf_mailfrom_registered_domain": auth.alignment.spf_mailfrom_registered_domain,
+        "spf_helo_domain": auth.alignment.spf_helo_domain,
+        "spf_status": auth.spf.status,
+        "dkim_status": dkim_display_status,
+        "dkim_domain": auth.alignment.dkim_domain,
+        "dkim_signatures_count": len(auth.dkim_signatures),
+        "dkim_selector": auth.dkim.selector,
+        "dmarc_status": auth.dmarc.status,
+        "spf_aligned": auth.alignment.spf_aligned,
+        "dkim_aligned": auth.alignment.dkim_aligned,
+        "dmarc_aligned": auth.alignment.dmarc_aligned,
+        "sender_mismatch": auth.alignment.sender_mismatch,
+        "authserv_id": auth.authserv_id,
+        "is_authserv_trusted": auth.is_authserv_trusted,
+        "authserv_trusted": auth.authserv_trusted,
+        "evidence_source": auth.evidence_source,
+        "authentication_results_present": auth.authentication_results_present,
+        "auth_headers_present": auth.auth_headers_present,
+        "subject_urgent_flags": urgent_flags,
     }
 
-    has_sender_mismatch = False
+    # 2. Sender Spoofing Check (From vs Return-Path registered domain mismatch)
+    has_sender_mismatch = auth.alignment.sender_mismatch
+    if has_sender_mismatch:
+        from_d = auth.alignment.from_registered_domain or "unknown"
+        rp_d = auth.alignment.return_path_registered_domain or "unknown"
+        base_risk += 35
+        signals.append({
+            "id": "sender_domain_mismatch",
+            "severity": "high",
+            "title": "Sender Address Spoofing",
+            "description": f"The visual sender domain ({from_d}) does not match the delivery address domain ({rp_d}). This is a strong indicator of header spoofing.",
+        })
+
+    # 3. Check Authentication Results: Authoritative vs Untrusted Claim Scoring
+    is_trusted_auth = auth.is_authoritative
+
     has_spf_fail = False
     has_dkim_fail = False
+    has_dmarc_fail = False
 
-    # 1. Sender Spoofing Check (From vs Return-Path domain mismatch) - Weight: 45
-    if from_header and return_path:
-        from_domain = extract_domain_from_email(from_header)
-        return_domain = extract_domain_from_email(return_path)
-        
-        if from_domain and return_domain and from_domain != return_domain:
-            if not (from_domain.endswith("." + return_domain) or return_domain.endswith("." + from_domain)):
-                has_sender_mismatch = True
-                base_risk += 45
-                signals.append({
-                    "id": "sender_domain_mismatch",
-                    "severity": "high",
-                    "title": "Sender Address Spoofing",
-                    "description": f"The visual sender domain ({from_domain}) does not match the actual delivery address domain ({return_domain}). This is a classic indicator of header forgery."
-                })
-                details["sender_mismatch"] = True
-                
-    # 2. Check SPF status - Weight: 40
-    if spf_header:
-        spf_header_lower = spf_header.lower()
-        if "fail" in spf_header_lower or "deny" in spf_header_lower:
+    if is_trusted_auth:
+        # Trusted gateway evaluation: apply authoritative failure scoring
+        if auth.spf.status == "fail":
             has_spf_fail = True
-            details["spf_status"] = "fail"
-        elif "softfail" in spf_header_lower:
-            base_risk += 20
+            base_risk += 35
+            signals.append({
+                "id": "spf_fail",
+                "severity": "high",
+                "title": "SPF Authentication Failure",
+                "description": "The Sender Policy Framework (SPF) check failed. The sending server is NOT authorized to send emails on behalf of this domain.",
+            })
+        elif auth.spf.status == "softfail":
+            base_risk += 15
             signals.append({
                 "id": "spf_softfail",
                 "severity": "medium",
                 "title": "SPF Authentication Softfail",
-                "description": "SPF records suggest the sending server is not fully authorized, but the policy is set to soft-fail."
+                "description": "SPF records suggest the sending server is not fully authorized, but the policy is set to soft-fail.",
             })
-            details["spf_status"] = "softfail"
-        elif "pass" in spf_header_lower:
-            details["spf_status"] = "pass"
-            
-    if auth_results and details["spf_status"] == "unknown":
-        auth_results_lower = auth_results.lower()
-        if "spf=fail" in auth_results_lower:
-            has_spf_fail = True
-            details["spf_status"] = "fail"
-        elif "spf=pass" in auth_results_lower:
-            details["spf_status"] = "pass"
-        elif "spf=none" in auth_results_lower:
-            details["spf_status"] = "none"
-            
-    if has_spf_fail:
-        base_risk += 40
-        signals.append({
-            "id": "spf_fail",
-            "severity": "high",
-            "title": "SPF Authentication Failure",
-            "description": "The Sender Policy Framework (SPF) check failed. The sending server is NOT authorized to send emails on behalf of this domain."
-        })
-        
-    # 3. Check DKIM Status - Weight: 20
-    if dkim_signature:
-        details["dkim_status"] = "signed"
-    else:
-        details["dkim_status"] = "missing"
-        
-    if auth_results:
-        auth_results_lower = auth_results.lower()
-        if "dkim=fail" in auth_results_lower:
+        elif auth.spf.status in ("temperror", "permerror"):
+            base_risk += 10
+            signals.append({
+                "id": f"spf_{auth.spf.status}",
+                "severity": "medium",
+                "title": f"SPF Evaluation {auth.spf.status.capitalize()}",
+                "description": f"The SPF record evaluation resulted in a {auth.spf.status}.",
+            })
+
+        if auth.dkim.status == "fail":
             has_dkim_fail = True
-            details["dkim_status"] = "fail"
-        elif "dkim=pass" in auth_results_lower:
-            details["dkim_status"] = "pass"
-            
-    if has_dkim_fail:
-        base_risk += 20
-        signals.append({
-            "id": "dkim_fail",
-            "severity": "medium",
-            "title": "DKIM Verification Failed",
-            "description": "The DKIM digital signature is invalid, meaning the email body or headers were modified in transit or signed with a bad key."
-        })
-    elif details["dkim_status"] in ["missing", "unknown"]:
-        base_risk += 10
-        signals.append({
-            "id": "dkim_missing",
-            "severity": "low",
-            "title": "No Cryptographic DKIM Signature",
-            "description": "The email lacks a digital DKIM signature. While common for newsletters or personal mails, major corporate domains always sign messages."
-        })
+            base_risk += 25
+            signals.append({
+                "id": "dkim_fail",
+                "severity": "high",
+                "title": "DKIM Verification Failed",
+                "description": "The DKIM digital signature is invalid, meaning the email body or headers were modified in transit or signed with an invalid key.",
+            })
 
-    # 4. Urgency in Subject - Weight: 15
-    if subject:
-        subject_lower = subject.lower()
-        urgent_words = ["urgent", "action required", "suspended", "notice", "alert", "security update"]
-        for word in urgent_words:
-            if word in subject_lower:
-                base_risk += 15
-                signals.append({
-                    "id": f"subject_urgent_{word.replace(' ', '_')}",
-                    "severity": "medium",
-                    "title": f"Urgent Topic in Subject ({word.capitalize()})",
-                    "description": f"The email subject line uses the trigger word '{word}' to induce stress and fast clicking."
-                })
-                break
+        if auth.dmarc.status == "fail":
+            has_dmarc_fail = True
+            base_risk += 25
+            signals.append({
+                "id": "dmarc_fail",
+                "severity": "high",
+                "title": "DMARC Policy Failure",
+                "description": "The message failed DMARC authentication and alignment policy checks.",
+            })
 
-    # Compounding Boost Rules for Headers
-    # Rule A: Sender Domain Mismatch + SPF Fail = Threat Score 95 immediately
-    if has_sender_mismatch and has_spf_fail:
-        base_risk = 95
-        signals.append({
-            "id": "compound_sender_spoof_and_spf_fail",
-            "severity": "high",
-            "title": "Critical Risk: Forged Sender with SPF Failure",
-            "description": "The sending server failed authentication AND the visual sender domain is spoofed. This is certain header forgery."
-        })
-        
-    # Rule B: SPF Fail + DKIM Fail = Add +15 points
-    elif has_spf_fail and has_dkim_fail:
-        base_risk += 15
-        signals.append({
-            "id": "compound_spf_and_dkim_fail",
-            "severity": "high",
-            "title": "Compounded Risk: SPF & DKIM Authentication Failure",
-            "description": "Both SPF and DKIM checks failed. The message is completely unauthenticated and likely forged."
-        })
+        # Compounding Boost Rules for Verified Headers
+        # Rule A: Sender Domain Mismatch + SPF Fail = Critical Threat
+        if has_sender_mismatch and has_spf_fail:
+            base_risk = max(base_risk, 95)
+            signals.append({
+                "id": "compound_sender_spoof_and_spf_fail",
+                "severity": "high",
+                "title": "Critical Risk: Forged Sender with SPF Failure",
+                "description": "The sending server failed SPF authentication AND the visual sender domain is spoofed. This is certain header forgery.",
+            })
+        # Rule B: SPF Fail + DKIM Fail = Add +15 points compound boost
+        elif has_spf_fail and has_dkim_fail:
+            base_risk += 15
+            signals.append({
+                "id": "compound_spf_and_dkim_fail",
+                "severity": "high",
+                "title": "Compounded Risk: SPF & DKIM Authentication Failure",
+                "description": "Both SPF and DKIM checks failed. The message is completely unauthenticated and likely forged.",
+            })
+
+    else:
+        # Untrusted claims (user-uploaded headers): surface diagnostic metadata without authoritative penalties
+        untrusted_claims = []
+        if auth.spf.status in ("fail", "softfail"):
+            untrusted_claims.append(f"SPF: {auth.spf.status}")
+        if auth.dkim.status == "fail":
+            untrusted_claims.append("DKIM: fail")
+        if auth.dmarc.status == "fail":
+            untrusted_claims.append("DMARC: fail")
+
+        if untrusted_claims:
+            base_risk += 5
+            signals.append({
+                "id": "untrusted_auth_claim",
+                "severity": "low",
+                "title": "Untrusted Authentication Header Claim",
+                "description": f"The message header contains an unverified authentication claim ({', '.join(untrusted_claims)}) from '{auth.authserv_id or auth.evidence_source}'. This is evaluated as diagnostic claim metadata, not verified receiver evidence.",
+            })
 
     risk_score = min(base_risk, 100)
-    
+
     return {
         "risk_score": risk_score,
         "signals": signals,
-        "details": details
+        "details": details,
     }

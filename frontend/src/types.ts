@@ -41,6 +41,12 @@ export interface URLhausData {
   malware_families: string[];
 }
 
+export interface WebRiskData {
+  status: string;
+  in_database: boolean;
+  threat_types?: string[];
+}
+
 export interface AnalysisResponse {
   input_type: "url" | "email_text" | "email_header";
   risk_score: number;
@@ -79,6 +85,11 @@ export interface AnalysisResponse {
   urlhaus_status?: string;
   urlhaus_threat_type?: string;
   urlhaus_in_database?: boolean;
+  webrisk_findings?: WebRiskData;
+  webrisk_status?: string;
+  webrisk_threat_types?: string[];
+  webrisk_in_database?: boolean;
+  local_feed_findings?: Record<string, any>;
 }
 
 export interface ScanHistoryItem {

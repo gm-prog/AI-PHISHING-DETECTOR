@@ -53,14 +53,14 @@ def analyze_url(url: str) -> Dict[str, Any]:
     try:
         parsed_url = urlparse(clean_url)
         domain_info = tldextract.extract(clean_url)
-    except Exception as e:
+    except Exception:
         return {
             "risk_score": 95,
             "signals": [{
                 "id": "invalid_url_format",
                 "severity": "high",
                 "title": "Invalid URL Structure",
-                "description": f"The URL is deformed or failed parsing: {str(e)}"
+                "description": "The URL is deformed or failed parsing."
             }],
             "details": {"error": "Failed to parse URL"}
         }

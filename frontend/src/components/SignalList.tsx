@@ -16,6 +16,8 @@ export const SignalList: React.FC<SignalListProps> = ({ signals, analysisData })
 
   const hasVT = analysisData?.vt_status === "success";
   const hasUH = analysisData?.urlhaus_status === "success";
+  const hasWR = Boolean(analysisData?.webrisk_status);
+  const hasIntel = hasVT || hasUH || hasWR;
 
   if (!signals || signals.length === 0) {
     return (
@@ -30,8 +32,8 @@ export const SignalList: React.FC<SignalListProps> = ({ signals, analysisData })
           </p>
         </div>
 
-        {/* Still show VT/URLhaus even when no heuristic signals */}
-        {(hasVT || hasUH) && (
+        {/* Still show external intel even when no heuristic signals */}
+        {hasIntel && (
           <ExternalIntelPanel analysisData={analysisData} />
         )}
       </div>
@@ -132,7 +134,8 @@ export const SignalList: React.FC<SignalListProps> = ({ signals, analysisData })
       </div>
 
       {/* External Threat Intelligence */}
-      {(hasVT || hasUH) && (
+      {/* External Threat Intelligence */}
+      {hasIntel && (
         <div className="mt-4 border-t border-white/5 pt-4">
           <ExternalIntelPanel analysisData={analysisData} />
         </div>
@@ -141,13 +144,106 @@ export const SignalList: React.FC<SignalListProps> = ({ signals, analysisData })
   );
 };
 
-// Separate component for VT + URLhaus panels
+// Separate component for VT + URLhaus + Google Web Risk panels
 const ExternalIntelPanel: React.FC<{ analysisData?: AnalysisResponse }> = ({ analysisData }) => {
   const hasVT = analysisData?.vt_status === "success";
   const hasUH = analysisData?.urlhaus_status === "success";
+  const wrStatus = analysisData?.webrisk_status;
+  const showWR = Boolean(wrStatus);
 
   return (
     <div className="space-y-3">
+      {/* Google Web Risk Panel */}
+      {showWR && (
+        <div className={`rounded-xl border p-3.5 ${
+          wrStatus === "success"
+            ? analysisData?.webrisk_in_database
+              ? "border-red-500/30 bg-red-950/20"
+              : "border-emerald-500/20 bg-emerald-950/10"
+            : wrStatus === "skipped"
+            ? "border-slate-500/20 bg-slate-950/20"
+            : wrStatus === "timeout"
+            ? "border-amber-500/30 bg-amber-950/10"
+            : wrStatus === "provider_unavailable"
+            ? "border-orange-500/30 bg-orange-950/10"
+            : "border-rose-500/30 bg-rose-950/20"
+        }`}>
+          <div className="flex items-center gap-2 mb-2">
+            {wrStatus === "success" ? (
+              analysisData?.webrisk_in_database ? (
+                <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
+              ) : (
+                <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+              )
+            ) : wrStatus === "skipped" ? (
+              <Info className="w-3.5 h-3.5 text-slate-400" />
+            ) : (
+              <AlertTriangle className={`w-3.5 h-3.5 ${
+                wrStatus === "timeout" ? "text-amber-400" : wrStatus === "provider_unavailable" ? "text-orange-400" : "text-rose-400"
+              }`} />
+            )}
+            <span className="text-[10px] font-mono font-bold text-slate-300 uppercase tracking-widest">
+              Google Web Risk
+            </span>
+            <span className={`ml-auto text-[9px] px-2 py-0.5 rounded-full font-mono font-bold border ${
+              wrStatus === "success"
+                ? analysisData?.webrisk_in_database
+                  ? "border-red-500/30 bg-red-500/10 text-red-400"
+                  : "border-green-500/30 bg-green-500/10 text-green-400"
+                : wrStatus === "skipped"
+                ? "border-slate-500/30 bg-slate-500/10 text-slate-400"
+                : wrStatus === "timeout"
+                ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                : wrStatus === "provider_unavailable"
+                ? "border-orange-500/30 bg-orange-500/10 text-orange-400"
+                : "border-rose-500/30 bg-rose-500/10 text-rose-400"
+            }`}>
+              {wrStatus === "success"
+                ? (analysisData?.webrisk_in_database ? "THREAT DETECTED" : "CLEAR")
+                : wrStatus === "skipped"
+                ? "UNCONFIGURED"
+                : wrStatus === "timeout"
+                ? "TIMEOUT"
+                : wrStatus === "provider_unavailable"
+                ? "UNAVAILABLE"
+                : "ERROR"}
+            </span>
+          </div>
+
+          {wrStatus === "success" ? (
+            analysisData?.webrisk_in_database ? (
+              <div className="space-y-1.5 text-left">
+                <p className="text-xs text-red-300 font-semibold">
+                  ⛔ Flagged by Google Web Risk unsafe resource database!
+                </p>
+                {analysisData.webrisk_threat_types && analysisData.webrisk_threat_types.length > 0 && (
+                  <div className="space-y-1">
+                    <span className="text-[10px] text-amber-400 font-mono">Threat Categories:</span>
+                    <div className="flex flex-wrap gap-1.5 mt-0.5">
+                      {analysisData.webrisk_threat_types.map((type, idx) => (
+                        <span key={idx} className="text-[10px] text-red-400 bg-red-500/10 px-2 py-0.5 rounded font-mono">
+                          {type}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-green-300">✅ Web Risk successfully checked the URL and no matching unsafe resource was returned.</p>
+            )
+          ) : wrStatus === "skipped" ? (
+            <p className="text-xs text-slate-400">ℹ️ Google Web Risk API key is not configured; external threat check skipped.</p>
+          ) : wrStatus === "timeout" ? (
+            <p className="text-xs text-amber-300/80">⚠️ Provider check timed out; no definitive threat result available.</p>
+          ) : wrStatus === "provider_unavailable" ? (
+            <p className="text-xs text-orange-300/80">⚠️ Provider queue is saturated; check was deferred.</p>
+          ) : (
+            <p className="text-xs text-rose-300/80">⚠️ Provider query encountered an error; threat status inconclusive.</p>
+          )}
+        </div>
+      )}
+
       {/* VirusTotal Panel */}
       {hasVT && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-950/10 p-3.5">

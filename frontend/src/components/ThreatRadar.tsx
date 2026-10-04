@@ -7,7 +7,7 @@ interface ThreatRadarProps {
 }
 
 export const ThreatRadar: React.FC<ThreatRadarProps> = ({ response }) => {
-  const { input_type, risk_score, phishing_signals, virustotal_findings, urlhaus_in_database } = response;
+  const { input_type, risk_score, phishing_signals, virustotal_findings, urlhaus_in_database, webrisk_in_database } = response;
 
   // Calculate individual vector intensities
   const domainSpoofSignals = phishing_signals.filter(s =>
@@ -22,7 +22,7 @@ export const ThreatRadar: React.FC<ThreatRadarProps> = ({ response }) => {
     s.id.includes("spf") || s.id.includes("dkim") || s.id.includes("mismatch")
   ).length;
 
-  const externalThreatHit = (virustotal_findings?.malicious_count ?? 0) > 0 || urlhaus_in_database;
+  const externalThreatHit = (virustotal_findings?.malicious_count ?? 0) > 0 || Boolean(urlhaus_in_database) || Boolean(webrisk_in_database);
 
   // Normalized vector scores (0 to 100)
   const lexicalScore = Math.min(100, domainSpoofSignals * 35 + (input_type === "url" && risk_score > 30 ? 20 : 0));
