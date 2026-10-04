@@ -24,15 +24,16 @@ class TTLCache:
                 return None
             return value
 
-    async def set(self, key: str, value: Any) -> None:
+    async def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
         async with self._lock:
             now = time.monotonic()
+            effective_ttl = ttl_seconds if (ttl_seconds is not None and ttl_seconds > 0) else self.ttl_seconds
             expired = [k for k, (expires, _) in self._items.items() if expires <= now]
             for k in expired:
                 self._items.pop(k, None)
             while len(self._items) >= self.max_entries:
                 self._items.pop(next(iter(self._items)))
-            self._items[key] = (now + self.ttl_seconds, value)
+            self._items[key] = (now + effective_ttl, value)
 
     def clear(self) -> None:
         self._items.clear()

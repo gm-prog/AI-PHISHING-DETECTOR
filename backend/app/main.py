@@ -736,7 +736,8 @@ async def analyze_input(
                     timeout_seconds=5.0,
                     acquire_timeout_seconds=2.0,
                 )
-                await webrisk_cache.set(wr_cache_key, wr_data)
+                wr_ttl = wr_data.get("cache_ttl_seconds") if isinstance(wr_data, dict) else None
+                await webrisk_cache.set(wr_cache_key, wr_data, ttl_seconds=wr_ttl)
             wr_status = wr_data.get("status") if wr_data else "error"
             if wr_status == "success" and wr_data.get("in_database"):
                 # Google Web Risk match -> +30 risk points (capped at +30 once)

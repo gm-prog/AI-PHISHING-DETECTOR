@@ -9,7 +9,8 @@ threat detection and must not be redistributed outside the constraints of Google
 import aiohttp
 import asyncio
 import logging
-from typing import Dict, Any, List
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,22 @@ SUPPORTED_THREAT_TYPES = [
     "MALWARE",
     "UNWANTED_SOFTWARE",
 ]
+
+
+def _calculate_effective_ttl(expire_time_str: Optional[str], default_ttl: int = 600, max_ttl: int = 600, min_ttl: int = 60) -> int:
+    """Calculate bounded TTL in seconds from upstream RFC3339 expireTime."""
+    if not expire_time_str or not isinstance(expire_time_str, str):
+        return default_ttl
+    try:
+        clean_iso = expire_time_str.strip().replace("Z", "+00:00")
+        exp_dt = datetime.fromisoformat(clean_iso)
+        now_dt = datetime.now(timezone.utc)
+        diff_seconds = int((exp_dt - now_dt).total_seconds())
+        if diff_seconds < min_ttl:
+            return min_ttl
+        return min(max_ttl, diff_seconds)
+    except Exception:
+        return default_ttl
 
 
 def _is_valid_url(url: str) -> bool:
@@ -107,11 +124,14 @@ async def check_url_with_webrisk(url: str, api_key: str) -> Dict[str, Any]:
                 if threat and isinstance(threat, dict):
                     raw_types = threat.get("threatTypes", [])
                     threat_types: List[str] = [str(t) for t in raw_types if isinstance(t, str)]
+                    expire_time_str = threat.get("expireTime")
+                    effective_ttl = _calculate_effective_ttl(expire_time_str)
                     return {
                         "status": "success",
                         "url": clean_url,
                         "in_database": len(threat_types) > 0,
                         "threat_types": threat_types,
+                        "cache_ttl_seconds": effective_ttl,
                     }
                 else:
                     return {
@@ -119,6 +139,7 @@ async def check_url_with_webrisk(url: str, api_key: str) -> Dict[str, Any]:
                         "url": clean_url,
                         "in_database": False,
                         "threat_types": [],
+                        "cache_ttl_seconds": 600,
                     }
 
     except asyncio.TimeoutError:

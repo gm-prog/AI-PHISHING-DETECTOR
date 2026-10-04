@@ -2,13 +2,20 @@ import asyncio
 import hashlib
 import json
 import logging
+from datetime import datetime, timezone, timedelta
 import pytest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.main import app, limiter
-from app.services.webrisk_service import check_url_with_webrisk, WEBRISK_LOOKUP_URL
-from app.services.provider_guard import webrisk_cache, webrisk_semaphore
+from app.services.webrisk_service import check_url_with_webrisk, WEBRISK_LOOKUP_URL, _calculate_effective_ttl
+from app.services.provider_guard import (
+    webrisk_cache,
+    webrisk_semaphore,
+    run_bounded,
+    stable_key,
+    ProviderQueueExhaustedError,
+)
 from app.config import settings
 
 
@@ -182,8 +189,6 @@ async def test_webrisk_malformed_json_handling():
 @pytest.mark.asyncio
 async def test_webrisk_cache_deduplication():
     """Verify identical URL queries within TTL use cached response without issuing HTTP request."""
-    from app.services.provider_guard import stable_key, run_bounded
-
     call_count = 0
 
     def record_call(*args, **kwargs):
@@ -235,23 +240,71 @@ def test_webrisk_cache_key_privacy():
 
 @pytest.mark.asyncio
 async def test_webrisk_concurrency_bounding():
-    """Verify provider concurrency is bounded by webrisk_semaphore."""
-    assert webrisk_semaphore._value <= 5
+    """
+    Test Goal A1: Verify provider concurrency is strictly bounded by webrisk_semaphore
+    during concurrent execution, and queue saturation raises ProviderQueueExhaustedError.
+    """
+    current_concurrency = 0
+    max_observed_concurrency = 0
+    lock = asyncio.Lock()
 
-    # Acquire all permits
-    acquired = []
-    for _ in range(webrisk_semaphore._value):
-        await webrisk_semaphore.acquire()
-        acquired.append(True)
+    async def instrumented_operation():
+        nonlocal current_concurrency, max_observed_concurrency
+        async with lock:
+            current_concurrency += 1
+            if current_concurrency > max_observed_concurrency:
+                max_observed_concurrency = current_concurrency
+        await asyncio.sleep(0.05)
+        async with lock:
+            current_concurrency -= 1
+        return {"status": "success", "in_database": False}
 
-    # With semaphore exhausted, provider returns queue_exhausted / error gracefully
-    res = await check_url_with_webrisk("https://overflow.org", api_key="test-key")
-    assert res["status"] in ("error", "queue_exhausted")
-    assert res["in_database"] is False
+    # Run 10 concurrent requests through run_bounded with webrisk_semaphore
+    tasks = [
+        run_bounded(
+            instrumented_operation(),
+            webrisk_semaphore,
+            timeout_seconds=2.0,
+            acquire_timeout_seconds=2.0,
+        )
+        for _ in range(10)
+    ]
+    results = await asyncio.gather(*tasks)
 
-    # Release permits
-    for _ in acquired:
-        webrisk_semaphore.release()
+    assert len(results) == 10
+    # Semaphore permit capacity is 4: maximum concurrency must never exceed 4
+    assert max_observed_concurrency <= 4
+    assert max_observed_concurrency > 0
+
+    # Test Queue Saturation / Exhaustion:
+    # Hold all 4 permits with slow tasks
+    hold_event = asyncio.Event()
+
+    async def blocker():
+        await hold_event.wait()
+        return "blocked_done"
+
+    blocking_tasks = [
+        asyncio.create_task(
+            run_bounded(blocker(), webrisk_semaphore, timeout_seconds=5.0, acquire_timeout_seconds=1.0)
+        )
+        for _ in range(4)
+    ]
+    # Allow blockers to acquire all permits
+    await asyncio.sleep(0.02)
+
+    # 5th task attempts to acquire with short acquire timeout and must fail with ProviderQueueExhaustedError
+    with pytest.raises(ProviderQueueExhaustedError):
+        await run_bounded(
+            instrumented_operation(),
+            webrisk_semaphore,
+            timeout_seconds=1.0,
+            acquire_timeout_seconds=0.05,
+        )
+
+    # Clean up blocker tasks
+    hold_event.set()
+    await asyncio.gather(*blocking_tasks)
 
 
 @pytest.mark.asyncio
@@ -272,12 +325,37 @@ async def test_webrisk_log_redaction(caplog):
 
 def test_webrisk_pipeline_integration_capped_score(test_client, monkeypatch):
     """
-    Test full /api/analyze URL analysis pipeline with Google Web Risk:
-    - Multiple threat types are capped at +30 score contribution
-    - Web Risk signals are present in phishing_signals
-    - Web Risk findings are included in the response
+    Test Goal A2: Mathematically prove Web Risk +30 cap in /api/analyze pipeline:
+    - Multiple threat types (e.g. 3 types) contribute exactly +30 total (not +90).
+    - baseline_score + 30 == final_score (e.g. baseline 40 -> final 70).
     """
-    async def mock_webrisk_phish(url, api_key):
+    # 1. First measure baseline score without Web Risk
+    async def mock_clean_webrisk(url, api_key):
+        return {"status": "success", "url": url, "in_database": False, "threat_types": []}
+
+    async def mock_clean_vt(url, api_key):
+        return {"status": "success", "url": url, "malicious_count": 0, "suspicious_count": 0, "reputation_score": 100, "vendors": []}
+
+    async def mock_clean_uh(url):
+        return {"status": "success", "url": url, "in_database": False, "threat_type": None, "date_added": "", "malware_families": []}
+
+    monkeypatch.setattr("app.main.check_url_with_webrisk", mock_clean_webrisk)
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", mock_clean_vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", mock_clean_uh)
+
+    headers = get_csrf_headers(test_client)
+    sample_url = "http://suspicious-test-portal.xyz/login"
+
+    res_baseline = test_client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": sample_url},
+        headers=headers,
+    )
+    assert res_baseline.status_code == 200
+    baseline_score = res_baseline.json()["risk_score"]
+
+    # 2. Now run with 3 threat types flagged by Web Risk
+    async def mock_multi_threat_webrisk(url, api_key):
         return {
             "status": "success",
             "url": url,
@@ -285,48 +363,99 @@ def test_webrisk_pipeline_integration_capped_score(test_client, monkeypatch):
             "threat_types": ["SOCIAL_ENGINEERING", "MALWARE", "UNWANTED_SOFTWARE"],
         }
 
-    async def mock_vt_clean(url, api_key):
-        return {
-            "status": "success",
-            "url": url,
-            "malicious_count": 0,
-            "suspicious_count": 0,
-            "reputation_score": 100,
-            "vendors": [],
-        }
+    monkeypatch.setattr("app.main.check_url_with_webrisk", mock_multi_threat_webrisk)
 
-    async def mock_uh_clean(url):
+    # Clear cache to ensure re-evaluation
+    webrisk_cache.clear()
+
+    res_flagged = test_client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": sample_url},
+        headers=headers,
+    )
+    assert res_flagged.status_code == 200
+    flagged_data = res_flagged.json()
+    final_score = flagged_data["risk_score"]
+
+    # Mathematically prove exact +30 score boost (capped at 100 max)
+    expected_score = min(100, baseline_score + 30)
+    assert final_score == expected_score
+    # Prove that 3 threat types did not multiply the score (+90 would exceed expected_score)
+    if baseline_score <= 70:
+        assert final_score == baseline_score + 30
+
+    assert flagged_data["webrisk_status"] == "success"
+    assert flagged_data["webrisk_in_database"] is True
+    assert len(flagged_data["webrisk_threat_types"]) == 3
+    assert any("Google Web Risk Flagged" in s["title"] for s in flagged_data["phishing_signals"])
+
+
+def test_webrisk_cache_real_pipeline_orchestration(test_client, monkeypatch):
+    """
+    Test Goal A3: Test Web Risk cache through the real /api/analyze path:
+    - Same URL called twice invokes provider exactly once (second request uses cache).
+    - Different URL invokes provider for a fresh lookup.
+    """
+    call_counts = {"count": 0}
+
+    async def instrumented_webrisk(url, api_key):
+        call_counts["count"] += 1
         return {
             "status": "success",
             "url": url,
             "in_database": False,
-            "threat_type": None,
-            "date_added": "",
-            "malware_families": [],
+            "threat_types": [],
         }
 
-    monkeypatch.setattr("app.main.check_url_with_webrisk", mock_webrisk_phish)
-    monkeypatch.setattr("app.main.analyze_url_with_virustotal", mock_vt_clean)
-    monkeypatch.setattr("app.main.check_url_with_urlhaus", mock_uh_clean)
+    monkeypatch.setattr("app.main.check_url_with_webrisk", instrumented_webrisk)
+    webrisk_cache.clear()
 
     headers = get_csrf_headers(test_client)
-    res = test_client.post(
-        "/api/analyze",
-        json={"input_type": "url", "content": "https://webrisk-phish-sample.com"},
-        headers=headers,
-    )
-    assert res.status_code == 200
-    data = res.json()
+    url_a = "https://example-domain-a.org/login"
+    url_b = "https://example-domain-b.org/login"
 
-    assert data["webrisk_status"] == "success"
-    assert data["webrisk_in_database"] is True
-    assert "SOCIAL_ENGINEERING" in data["webrisk_threat_types"]
-    assert "MALWARE" in data["webrisk_threat_types"]
-    assert data["webrisk_findings"]["in_database"] is True
+    # Request 1 for URL A: Provider is called
+    res1 = test_client.post("/api/analyze", json={"input_type": "url", "content": url_a}, headers=headers)
+    assert res1.status_code == 200
+    assert call_counts["count"] == 1
 
-    # Risk score must have increased by at least 30, but total boost from Web Risk is +30 max
-    assert data["risk_score"] >= 30
-    assert any("Google Web Risk Flagged" in s["title"] for s in data["phishing_signals"])
+    # Request 2 for SAME URL A: Must hit cache, call count stays 1
+    res2 = test_client.post("/api/analyze", json={"input_type": "url", "content": url_a}, headers=headers)
+    assert res2.status_code == 200
+    assert call_counts["count"] == 1
+
+    # Request 3 for DIFFERENT URL B: Cache miss, call count increments to 2
+    res3 = test_client.post("/api/analyze", json={"input_type": "url", "content": url_b}, headers=headers)
+    assert res3.status_code == 200
+    assert call_counts["count"] == 2
+
+
+def test_webrisk_provider_aware_cache_ttl():
+    """
+    Test Goal A4: Verify provider-aware cache TTL calculation:
+    - Valid RFC3339 expireTime returns remaining seconds bounded by [min_ttl, max_ttl].
+    - Missing or malformed expireTime falls back safely to default 600s.
+    """
+    now = datetime.now(timezone.utc)
+
+    # 1. Future expireTime in 300 seconds
+    expire_in_300 = (now + timedelta(seconds=300)).isoformat()
+    ttl_300 = _calculate_effective_ttl(expire_in_300)
+    assert 295 <= ttl_300 <= 305
+
+    # 2. Far future expireTime (> 600s) is capped at max_ttl (600s)
+    expire_in_10000 = (now + timedelta(seconds=10000)).isoformat()
+    ttl_capped = _calculate_effective_ttl(expire_in_10000)
+    assert ttl_capped == 600
+
+    # 3. Near past or tiny future is bounded by min_ttl (60s)
+    expire_in_10 = (now + timedelta(seconds=10)).isoformat()
+    ttl_min = _calculate_effective_ttl(expire_in_10)
+    assert ttl_min == 60
+
+    # 4. None or malformed returns default 600s
+    assert _calculate_effective_ttl(None) == 600
+    assert _calculate_effective_ttl("invalid-date-string") == 600
 
 
 def test_webrisk_provider_non_fatal_on_failure(test_client, monkeypatch):
