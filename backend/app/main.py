@@ -48,7 +48,12 @@ from app.services.llm_service import analyze_with_llm
 from app.services.virustotal_service import analyze_url_with_virustotal
 from app.services.urlhaus_service import check_url_with_urlhaus
 from app.services.webrisk_service import check_url_with_webrisk
-from app.services.threat_feed_service import lookup_threat_indicator
+from app.services.threat_feed_service import (
+    lookup_threat_indicator,
+    get_registered_providers,
+    get_all_feed_states,
+    refresh_threat_feed,
+)
 from app.services.provider_guard import (
     llm_cache,
     virustotal_cache,
@@ -616,6 +621,40 @@ def get_all_scans_admin(
         "risk_score": r.risk_score,
         "status": r.status
     } for r in records]
+
+
+@app.get("/api/admin/threat-feeds")
+def get_threat_feeds_status_admin(
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin-only endpoint returning sanitized threat feed sync status and freshness."""
+    return {"sources": get_all_feed_states(db)}
+
+
+@app.post("/api/admin/threat-feeds/{source}/refresh")
+@limiter.limit("5/minute")
+async def manual_threat_feed_refresh_admin(
+    request: Request,
+    source: str,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Admin-only endpoint to trigger a manual, atomic feed refresh for a registered provider.
+    Protected against CSRF and SSRF: only server-side registered sources are accepted.
+    """
+    providers = get_registered_providers()
+    clean_source = source.strip().lower()
+    if clean_source not in providers:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Threat feed source '{source}' is not a registered provider."
+        )
+
+    provider = providers[clean_source]
+    res = await refresh_threat_feed(db, provider)
+    return res
 
 
 # ================= CORE THREAT SCANNER ENDPOINT =================

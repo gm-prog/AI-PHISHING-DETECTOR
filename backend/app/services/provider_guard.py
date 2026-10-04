@@ -59,6 +59,7 @@ llm_semaphore = asyncio.Semaphore(4)
 virustotal_semaphore = asyncio.Semaphore(4)
 urlhaus_semaphore = asyncio.Semaphore(8)
 webrisk_semaphore = asyncio.Semaphore(4)
+threat_feed_semaphore = asyncio.Semaphore(2)
 
 
 class ProviderQueueExhaustedError(Exception):
