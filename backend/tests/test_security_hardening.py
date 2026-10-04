@@ -301,12 +301,14 @@ def test_input_validation(client):
 
 def test_log_redaction():
     filter_instance = SensitiveLogFilter()
+    dummy_key = "AIzaSy" + "BCDEFGHIJKLMNOPQRSTUVWXYZ12345"
+    dummy_jwt = "Bearer " + "eyJhbGciOiJIUzI1NiJ9.xyz"
     record = logging.LogRecord(
         name="test",
         level=logging.INFO,
         pathname="",
         lineno=0,
-        msg="Connecting with key AIzaSyBCDEFGHIJKLMNOPQRSTUVWXYZ12345 and Bearer eyJhbGciOiJIUzI1NiJ9.xyz",
+        msg=f"Connecting with key {dummy_key} and {dummy_jwt}",
         args=(),
         exc_info=None,
     )

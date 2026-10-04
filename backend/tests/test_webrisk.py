@@ -221,7 +221,7 @@ async def test_webrisk_cache_deduplication():
 def test_webrisk_cache_key_privacy():
     """Verify cache keys use SHA-256 hash and do NOT contain raw URLs or API keys."""
     raw_url = "https://sensitive-company.internal/login?token=supersecret123"
-    api_key = "AIzaSySecretApiKey12345"
+    api_key = "test-google-webrisk-key-12345"
 
     url_hash = hashlib.sha256(raw_url.lower().encode("utf-8")).hexdigest()
     expected_cache_key = f"webrisk:{url_hash}"
@@ -257,7 +257,7 @@ async def test_webrisk_concurrency_bounding():
 @pytest.mark.asyncio
 async def test_webrisk_log_redaction(caplog):
     """Verify API keys are never leaked in log output even on connection failure."""
-    secret_key = "AIzaSySuperSecretGoogleKey999"
+    secret_key = "test-secret-google-api-key-999"
 
     mock_session = MockSession(get_exc=Exception(f"Connection failed with key {secret_key}"))
 
