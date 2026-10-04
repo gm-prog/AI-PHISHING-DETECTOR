@@ -181,7 +181,7 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
                     })
                     break
     except Exception:
-        pass
+        logger.debug("event=subject_urgency_parse_suppressed", exc_info=False)
 
     details = {
         "from_domain": auth.alignment.from_domain,
