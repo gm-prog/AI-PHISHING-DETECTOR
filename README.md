@@ -37,7 +37,7 @@ Ai phishing detector/
 │   │       └── llm_service.py         # Gemini AI integration
 │   ├── requirements.txt
 │   ├── .env                  # API key configuration
-│   └── tests/                # Test suite (107 passed specifications)
+│   └── tests/                # Test suite (109 passed specifications)
 │       ├── test_security_hardening.py # Gateway v1.2 security tests
 │       ├── test_webrisk.py            # Web Risk provider tests
 │       ├── test_email_auth.py         # Email auth parser tests

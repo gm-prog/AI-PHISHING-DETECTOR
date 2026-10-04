@@ -72,18 +72,45 @@ def ensure_schema_migrations(db_path: str = DB_PATH):
                     "UPDATE threat_indicators SET generation_id = ? WHERE source = ? AND (generation_id IS NULL OR generation_id = '')",
                     (legacy_gen, src),
                 )
+
+            # Reconcile ThreatFeedState for every source in threat_indicators
+            cursor.execute("SELECT DISTINCT source FROM threat_indicators")
+            all_sources = [r[0] for r in cursor.fetchall() if r[0]]
+            for src in all_sources:
+                legacy_gen = f"legacy-gen-{src}"
                 cursor.execute(
                     "SELECT COUNT(*) FROM threat_indicators WHERE source = ? AND generation_id = ?",
                     (src, legacy_gen),
                 )
                 cnt = cursor.fetchone()[0] or 0
 
-                cursor.execute("SELECT source FROM threat_feed_states WHERE source = ?", (src,))
-                if not cursor.fetchone():
+                cursor.execute("SELECT source, current_generation_id FROM threat_feed_states WHERE source = ?", (src,))
+                st = cursor.fetchone()
+                if not st:
                     cursor.execute("""
                         INSERT INTO threat_feed_states (source, enabled, status, freshness, last_success_count, current_generation_id, refresh_interval_seconds, updated_at)
                         VALUES (?, 1, 'idle', 'stale', ?, ?, 86400, datetime('now'))
                     """, (src, cnt, legacy_gen))
+                else:
+                    curr_gen = st[1]
+                    if not curr_gen:
+                        cursor.execute("""
+                            UPDATE threat_feed_states
+                            SET current_generation_id = ?, freshness = 'stale', status = 'idle', last_success_at = NULL, last_success_count = ?, updated_at = datetime('now')
+                            WHERE source = ?
+                        """, (legacy_gen, cnt, src))
+                    else:
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM threat_indicators WHERE source = ? AND generation_id = ?",
+                            (src, curr_gen),
+                        )
+                        active_cnt = cursor.fetchone()[0] or 0
+                        if active_cnt == 0:
+                            cursor.execute("""
+                                UPDATE threat_feed_states
+                                SET current_generation_id = ?, freshness = 'stale', status = 'idle', last_success_at = NULL, last_success_count = ?, updated_at = datetime('now')
+                                WHERE source = ?
+                            """, (legacy_gen, cnt, src))
 
             # Inspect table SQL to determine if unique constraint needs migration
             cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='threat_indicators'")
@@ -93,6 +120,7 @@ def ensure_schema_migrations(db_path: str = DB_PATH):
                 or "uq_source_gen_type_indicator" not in tbl_sql
                 or "UNIQUE (source, indicator_type, indicator_hash)" in tbl_sql
                 or "UNIQUE(source, indicator_type, indicator_hash)" in tbl_sql
+                or "uq_source_type_indicator" in tbl_sql
             )
 
             if needs_constraint_migration:
@@ -129,9 +157,12 @@ def ensure_schema_migrations(db_path: str = DB_PATH):
                 cursor.execute("DROP TABLE threat_indicators")
                 cursor.execute("ALTER TABLE threat_indicators_migrated RENAME TO threat_indicators")
 
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_generation_id ON threat_indicators (generation_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_indicator_hash ON threat_indicators (indicator_hash)")
             cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_source ON threat_indicators (source)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_indicator_type ON threat_indicators (indicator_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_indicator_hash ON threat_indicators (indicator_hash)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_classification ON threat_indicators (classification)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_expires_at ON threat_indicators (expires_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS ix_threat_indicators_generation_id ON threat_indicators (generation_id)")
 
         conn.commit()
     except Exception as e:

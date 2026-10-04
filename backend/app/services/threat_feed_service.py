@@ -151,9 +151,13 @@ def decompress_bz2_bounded(
     max_decompressed_bytes: int = 67108864,
 ) -> bytes:
     """
-    Decompresses a BZ2 stream in bounded chunks to protect against decompression bombs.
-    Raises ValueError on invalid stream or if decompressed size exceeds max_decompressed_bytes.
+    Decompresses a BZ2 stream in bounded chunks to protect against decompression bombs and malformed streams.
+    Enforces that the stream reaches a valid EOF marker.
+    Raises ValueError on invalid stream, truncated stream, or if decompressed size exceeds max_decompressed_bytes.
     """
+    if not compressed_bytes:
+        raise ValueError("Invalid BZ2 stream: empty payload")
+
     decompressor = bz2.BZ2Decompressor()
     decompressed_chunks = []
     total_decompressed = 0
@@ -173,10 +177,16 @@ def decompress_bz2_bounded(
                         f"Decompressed feed size exceeded maximum limit of {max_decompressed_bytes} bytes"
                     )
                 decompressed_chunks.append(out_chunk)
+            if decompressor.eof:
+                break
+
+        if not decompressor.eof:
+            raise ValueError("Invalid or truncated BZ2 stream: stream did not reach EOF marker")
+
     except ValueError:
         raise
     except (OSError, EOFError) as e:
-        raise ValueError("Invalid BZ2 stream") from e
+        raise ValueError(f"Invalid BZ2 stream: {type(e).__name__}") from e
 
     return b"".join(decompressed_chunks)
 
@@ -188,9 +198,9 @@ def build_phishtank_url(base_url: str, api_key: Optional[str]) -> str:
     - If no API key: http(s)://data.phishtank.com/data/online-valid.json.bz2 (or .json)
     """
     clean_url = (base_url or "").strip()
-    if not api_key or not api_key.strip():
+    if not api_key or not str(api_key).strip():
         return clean_url
-    clean_key = api_key.strip()
+    clean_key = str(api_key).strip()
 
     if "/data/online-valid." in clean_url:
         return clean_url.replace("/data/online-valid.", f"/data/{clean_key}/online-valid.")
@@ -198,6 +208,8 @@ def build_phishtank_url(base_url: str, api_key: Optional[str]) -> str:
         return clean_url.replace("<key>", clean_key)
     elif "{app_key}" in clean_url:
         return clean_url.replace("{app_key}", clean_key)
+    elif f"/data/{clean_key}/" in clean_url:
+        return clean_url
     elif clean_url.endswith("/data") or clean_url.endswith("/data/"):
         return f"{clean_url.rstrip('/')}/{clean_key}/online-valid.json.bz2"
     return clean_url

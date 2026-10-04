@@ -399,21 +399,36 @@ def test_evidence_fusion_combined_with_webrisk_and_virustotal(client, db_session
 @pytest.mark.asyncio
 async def test_phishtank_keyed_url_construction_and_bz2_decompression():
     """
-    Requirement Part K & L:
-    1. Verify keyed PhishTank downloadable feed URL is constructed using path parameter /data/<app_key>/online-valid.json.bz2
-    2. Verify safe bounded BZ2 decompression and rejection of decompression bombs / invalid streams.
+    Requirement Part K & L & Tasks 13-20:
+    1. Keyed PhishTank downloadable feed URL is constructed using path parameter /data/<app_key>/online-valid.json.bz2
+    2. URL builder normalizes whitespace and supports template paths.
+    3. Safe bounded BZ2 decompression handles single and multi-chunk streams.
+    4. Truncated BZ2 stream is strictly rejected (fails EOF check).
+    5. Malformed stream and decompression bombs are rejected.
     """
     from app.services.threat_feed_service import build_phishtank_url, decompress_bz2_bounded
 
-    # 1. Keyed URL construction
+    # 1. Keyed URL construction tests
     url1 = build_phishtank_url("http://data.phishtank.com/data/online-valid.json.bz2", "secret_key_123")
     assert url1 == "http://data.phishtank.com/data/secret_key_123/online-valid.json.bz2"
 
     url_https = build_phishtank_url("https://data.phishtank.com/data/online-valid.json", "secret_key_123")
     assert url_https == "https://data.phishtank.com/data/secret_key_123/online-valid.json"
 
+    # Whitespace key normalized
+    url_ws = build_phishtank_url("http://data.phishtank.com/data/online-valid.json.bz2", "  secret_key_123  ")
+    assert url_ws == "http://data.phishtank.com/data/secret_key_123/online-valid.json.bz2"
+
+    # Unkeyed URL
     url_unkeyed = build_phishtank_url("https://data.phishtank.com/data/online-valid.json.bz2", "")
     assert url_unkeyed == "https://data.phishtank.com/data/online-valid.json.bz2"
+
+    url_none = build_phishtank_url("https://data.phishtank.com/data/online-valid.json.bz2", None)
+    assert url_none == "https://data.phishtank.com/data/online-valid.json.bz2"
+
+    # Already keyed template
+    url_tmpl = build_phishtank_url("http://data.phishtank.com/data/<key>/online-valid.json.bz2", "secret_key_123")
+    assert url_tmpl == "http://data.phishtank.com/data/secret_key_123/online-valid.json.bz2"
 
     # 2. Valid BZ2 compression/decompression
     sample_records = [{"phish_id": 1, "url": "https://bz2-phish.com", "verified": "yes", "online": "yes"}]
@@ -423,15 +438,136 @@ async def test_phishtank_keyed_url_construction_and_bz2_decompression():
     decompressed = decompress_bz2_bounded(compressed, max_decompressed_bytes=10000)
     assert decompressed == raw_json_bytes
 
-    # 3. Decompression bomb / oversized decompressed output rejected
+    # 3. Multi-block / Multi-chunk BZ2 decompression (> 65536 bytes)
+    large_payload = (json.dumps([{"phish_id": i, "url": f"https://phish-{i}.com", "verified": "yes", "online": "yes"} for i in range(2500)])).encode("utf-8")
+    assert len(large_payload) > 65536
+    large_compressed = bz2.compress(large_payload)
+    decompressed_large = decompress_bz2_bounded(large_compressed, max_decompressed_bytes=len(large_payload) + 1000)
+    assert decompressed_large == large_payload
+
+    # 4. Truncated BZ2 stream must be rejected even if prefix is partially valid
+    truncated_compressed = large_compressed[:len(large_compressed) - 30]
+    with pytest.raises(ValueError, match="Invalid or truncated BZ2 stream"):
+        decompress_bz2_bounded(truncated_compressed, max_decompressed_bytes=len(large_payload) + 1000)
+
+    # 5. Decompression bomb / oversized decompressed output rejected
     huge_bytes = b"0" * 20000
     huge_compressed = bz2.compress(huge_bytes)
     with pytest.raises(ValueError, match="exceeded maximum limit"):
         decompress_bz2_bounded(huge_compressed, max_decompressed_bytes=1000)
 
-    # 4. Malformed BZ2 data rejected
+    # 6. Malformed BZ2 data rejected
     with pytest.raises(ValueError, match="Invalid BZ2 stream"):
         decompress_bz2_bounded(b"BZh9invalid_corrupted_data", max_decompressed_bytes=1000)
+
+    # 7. Empty payload rejected
+    with pytest.raises(ValueError, match="empty payload"):
+        decompress_bz2_bounded(b"", max_decompressed_bytes=1000)
+
+
+@pytest.mark.asyncio
+async def test_threat_feed_compressed_and_decompressed_limits_independent(db_session):
+    """
+    Requirements 18 & 24:
+    Test independent enforcement of compressed payload limits (fetch stage)
+    and decompressed payload limits (decompression stage), with sanitized error taxonomy.
+    """
+    prov = PhishTankFeedProvider(feed_url="http://data.phishtank.com/data/online-valid.json.bz2")
+
+    # Case A: Compressed size exceeds MAX_RESPONSE_BYTES (32MB) -> rejected by fetch layer
+    oversized_compressed = b"BZh9" + b"X" * (settings.THREAT_FEED_MAX_RESPONSE_BYTES + 100)
+    resp_oversized = MockStreamResponse(status=200, content_bytes=oversized_compressed)
+    with patch("aiohttp.ClientSession", return_value=MockStreamSession(response=resp_oversized)):
+        res = await refresh_threat_feed(db_session, prov)
+        assert res["status"] == "failed"
+        assert res["error_code"] in ("too_large", "invalid_payload")
+
+    # Case B: Compressed size is small (< 1KB), but decompressed output exceeds MAX_DECOMPRESSED_BYTES
+    huge_payload = b"A" * 50000
+    huge_compressed = bz2.compress(huge_payload)
+    assert len(huge_compressed) < settings.THREAT_FEED_MAX_RESPONSE_BYTES
+    resp_bomb = MockStreamResponse(status=200, content_bytes=huge_compressed)
+    with patch("aiohttp.ClientSession", return_value=MockStreamSession(response=resp_bomb)):
+        with patch.object(settings, "THREAT_FEED_MAX_DECOMPRESSED_BYTES", 1000):
+            res_bomb = await refresh_threat_feed(db_session, prov)
+            assert res_bomb["status"] == "failed"
+            assert res_bomb["error_code"] == "decompression_too_large"
+
+
+@pytest.mark.asyncio
+async def test_cache_validators_preservation_on_failure_and_activation(db_session):
+    """
+    Requirement 22 & 36:
+    Prove ETag and Last-Modified validators update ONLY on successful valid activations,
+    and remain unchanged across fetch/validation failures.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state = db_session.query(ThreatFeedState).filter_by(source="phishtank").first()
+    if not state:
+        state = ThreatFeedState(
+            source="phishtank",
+            enabled=True,
+            status="idle",
+            freshness="never_synced",
+            etag="initial-etag-111",
+            last_modified="Wed, 01 Oct 2026 00:00:00 GMT",
+            current_generation_id="gen-init-1",
+            updated_at=now_iso,
+        )
+        db_session.add(state)
+    else:
+        state.enabled = True
+        state.etag = "initial-etag-111"
+        state.last_modified = "Wed, 01 Oct 2026 00:00:00 GMT"
+        state.current_generation_id = "gen-init-1"
+
+    # Add initial indicator row matching current_generation_id
+    _, h_init = normalize_indicator_value("url", "https://initial-target.com")
+    db_session.add(ThreatIndicator(
+        id=str(uuid.uuid4()),
+        source="phishtank",
+        generation_id="gen-init-1",
+        indicator_type="url",
+        indicator="https://initial-target.com",
+        indicator_hash=h_init,
+        classification="phishing",
+        confidence=0.9,
+        observed_at=now_iso,
+        created_at=now_iso,
+        updated_at=now_iso,
+    ))
+    db_session.commit()
+
+    # 1. Failed fetch (HTTP 500) -> validators and generation preserved
+    resp_500 = MockStreamResponse(status=500)
+    prov = PhishTankFeedProvider(feed_url="http://data.phishtank.com/data/online-valid.json")
+    with patch("aiohttp.ClientSession", return_value=MockStreamSession(response=resp_500)):
+        res_fail = await refresh_threat_feed(db_session, prov)
+        assert res_fail["status"] == "failed"
+        db_session.refresh(state)
+        assert state.etag == "initial-etag-111"
+        assert state.last_modified == "Wed, 01 Oct 2026 00:00:00 GMT"
+        assert state.current_generation_id == "gen-init-1"
+
+    # 2. Malformed JSON payload -> validators and generation preserved
+    resp_bad = MockStreamResponse(status=200, content_bytes=b"invalid json", headers={"etag": "new-bad-etag"})
+    with patch("aiohttp.ClientSession", return_value=MockStreamSession(response=resp_bad)):
+        res_bad = await refresh_threat_feed(db_session, prov)
+        assert res_bad["status"] == "failed"
+        db_session.refresh(state)
+        assert state.etag == "initial-etag-111"
+        assert state.current_generation_id == "gen-init-1"
+
+    # 3. Successful activation -> validators and generation updated
+    valid_feed = json.dumps([{"phish_id": "1", "url": "https://valid-target.com", "verified": "yes", "online": "yes"}]).encode("utf-8")
+    resp_ok = MockStreamResponse(status=200, content_bytes=valid_feed, headers={"etag": "activated-etag-999", "last-modified": "Sun, 04 Oct 2026 12:00:00 GMT"})
+    with patch("aiohttp.ClientSession", return_value=MockStreamSession(response=resp_ok)):
+        res_ok = await refresh_threat_feed(db_session, prov)
+        assert res_ok["status"] == "success"
+        db_session.refresh(state)
+        assert state.etag == "activated-etag-999"
+        assert state.last_modified == "Sun, 04 Oct 2026 12:00:00 GMT"
+        assert state.current_generation_id == res_ok["generation_id"]
 
 
 @pytest.mark.asyncio
@@ -914,39 +1050,57 @@ async def test_realistic_legacy_database_migration_coexistence_and_lifecycle(tmp
 
 def test_migration_failure_fails_closed_and_raises(tmp_path, monkeypatch):
     """
-    Requirement Part J & Y:
-    Prove that database migration errors raise RuntimeError and fail closed
-    instead of silently swallowing exceptions.
+    Requirement Part J, Y & 11:
+    Prove that database migration errors raise RuntimeError, roll back the transaction,
+    and fail closed so that partially migrated schema or corrupt states are not committed.
     """
     from app.db import ensure_schema_migrations
     import sqlite3
 
     corrupt_db_file = str(tmp_path / "corrupt_test.db")
-    # Create invalid table state
+    # Create invalid table state where required columns are missing and cannot be copied
     conn = sqlite3.connect(corrupt_db_file)
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE threat_indicators (invalid_dummy_schema TEXT)")
+    cursor.execute("CREATE TABLE threat_indicators (id VARCHAR PRIMARY KEY, source VARCHAR)")
+    cursor.execute("INSERT INTO threat_indicators VALUES ('1', 'phishtank')")
     conn.commit()
     conn.close()
 
-    # ensure_schema_migrations must fail and raise RuntimeError
+    # ensure_schema_migrations must fail, rollback, and raise RuntimeError
     with pytest.raises(RuntimeError, match="Database schema migration failed"):
         ensure_schema_migrations(corrupt_db_file)
 
+    # Verify that the original table was not replaced with an empty or broken migrated table
+    conn2 = sqlite3.connect(corrupt_db_file)
+    cursor2 = conn2.cursor()
+    cursor2.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='threat_indicators_migrated'")
+    assert cursor2.fetchone() is None, "Temporary migration table must not remain after rollback"
+    conn2.close()
 
-def test_alembic_migrations_upgrade_and_downgrade(tmp_path):
+
+def test_alembic_realistic_legacy_migration_pragma_indexes_and_coexistence(tmp_path):
     """
-    Requirement Part A & Z:
-    Verify Alembic CLI migrations upgrade and downgrade cleanly against a SQLite database.
+    Requirements 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 30, 31, 32:
+    1. Realistic legacy schema containing all columns, legacy constraint uq_source_type_indicator, and legacy indexes.
+    2. Populate legacy records across multiple sources and edge-case threat_feed_states.
+    3. Run Alembic upgrade head.
+    4. Direct PRAGMA & sqlite_master inspection:
+       - Old constraint uq_source_type_indicator ABSENT.
+       - New constraint uq_source_gen_type_indicator PRESENT.
+       - All 6 indexes exist.
+    5. Verify legacy generation IDs & state reconciliation.
+    6. Verify duplicate indicator across generations succeeds (Generation Coexistence).
+    7. Verify migration idempotency (running upgrade head again).
+    8. Verify downgrade to base and re-upgrade to head.
     """
     import os
     import sqlite3
     from alembic.config import Config
     from alembic import command
 
-    test_db_file = str(tmp_path / "alembic_test.db")
-    
-    # 1. Start with a legacy database schema
+    test_db_file = str(tmp_path / "alembic_realistic_legacy.db")
+
+    # 1. Create realistic legacy pre-Task-3 database
     conn = sqlite3.connect(test_db_file)
     cursor = conn.cursor()
     cursor.execute("""
@@ -965,9 +1119,48 @@ def test_alembic_migrations_upgrade_and_downgrade(tmp_path):
             CONSTRAINT uq_source_type_indicator UNIQUE (source, indicator_type, indicator_hash)
         )
     """)
+    cursor.execute("CREATE INDEX ix_threat_indicators_source ON threat_indicators (source)")
+    cursor.execute("CREATE INDEX ix_threat_indicators_indicator_type ON threat_indicators (indicator_type)")
+    cursor.execute("CREATE INDEX ix_threat_indicators_indicator_hash ON threat_indicators (indicator_hash)")
+    cursor.execute("CREATE INDEX ix_threat_indicators_classification ON threat_indicators (classification)")
+    cursor.execute("CREATE INDEX ix_threat_indicators_expires_at ON threat_indicators (expires_at)")
+
+    # Legacy records
+    url_pt = "https://legacy-phishtank.com/login"
+    _, h_pt = normalize_indicator_value("url", url_pt)
     cursor.execute("""
         INSERT INTO threat_indicators (id, source, indicator_type, indicator, indicator_hash, classification, confidence, observed_at, created_at, updated_at)
-        VALUES ('leg-1', 'misp', 'ip', '198.51.100.1', 'hash_misp_1', 'malware', 0.90, '2026-10-04T00:00:00+00:00', '2026-10-04T00:00:00+00:00', '2026-10-04T00:00:00+00:00')
+        VALUES ('leg-pt-1', 'phishtank', 'url', ?, ?, 'phishing', 0.95, '2026-10-04T00:00:00Z', '2026-10-04T00:00:00Z', '2026-10-04T00:00:00Z')
+    """, (url_pt, h_pt))
+
+    url_op = "https://legacy-openphish.com/login"
+    _, h_op = normalize_indicator_value("url", url_op)
+    cursor.execute("""
+        INSERT INTO threat_indicators (id, source, indicator_type, indicator, indicator_hash, classification, confidence, observed_at, created_at, updated_at)
+        VALUES ('leg-op-1', 'openphish', 'url', ?, ?, 'phishing', 0.85, '2026-10-04T00:00:00Z', '2026-10-04T00:00:00Z', '2026-10-04T00:00:00Z')
+    """, (url_op, h_op))
+
+    # Pre-existing state with NULL current_generation_id
+    cursor.execute("""
+        CREATE TABLE threat_feed_states (
+            source VARCHAR(64) PRIMARY KEY,
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            status VARCHAR(32) NOT NULL DEFAULT 'idle',
+            freshness VARCHAR(32) NOT NULL DEFAULT 'never_synced',
+            last_success_at VARCHAR(32),
+            last_attempt_at VARCHAR(32),
+            last_success_count INTEGER NOT NULL DEFAULT 0,
+            last_error VARCHAR(256),
+            etag VARCHAR(128),
+            last_modified VARCHAR(128),
+            current_generation_id VARCHAR(36),
+            refresh_interval_seconds INTEGER NOT NULL DEFAULT 86400,
+            updated_at VARCHAR(32) NOT NULL
+        )
+    """)
+    cursor.execute("""
+        INSERT INTO threat_feed_states (source, enabled, status, freshness, last_success_count, current_generation_id, refresh_interval_seconds, updated_at)
+        VALUES ('phishtank', 1, 'idle', 'never_synced', 0, NULL, 86400, '2026-10-04T00:00:00Z')
     """)
     conn.commit()
     conn.close()
@@ -981,32 +1174,91 @@ def test_alembic_migrations_upgrade_and_downgrade(tmp_path):
 
     command.upgrade(alembic_cfg, "head")
 
-    # Verify tables and columns post-upgrade
+    # 3. Direct SQLite Introspection: PRAGMA and sqlite_master
     conn2 = sqlite3.connect(test_db_file)
     cursor2 = conn2.cursor()
+
+    cursor2.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='threat_indicators'")
+    table_sql = cursor2.fetchone()[0]
+
+    # PROOF: Old unique constraint is absent, new generation unique constraint is present
+    assert "uq_source_gen_type_indicator" in table_sql, "New generation-aware unique constraint must be present"
+    assert "uq_source_type_indicator" not in table_sql, "Legacy unique constraint must be explicitly removed"
+
+    # PROOF: All 6 intended indexes are present
+    cursor2.execute("PRAGMA index_list(threat_indicators)")
+    idx_list = [row[1] for row in cursor2.fetchall()]
+    expected_indexes = [
+        "ix_threat_indicators_source",
+        "ix_threat_indicators_indicator_type",
+        "ix_threat_indicators_indicator_hash",
+        "ix_threat_indicators_classification",
+        "ix_threat_indicators_expires_at",
+        "ix_threat_indicators_generation_id",
+    ]
+    for exp_idx in expected_indexes:
+        assert exp_idx in idx_list, f"Expected index {exp_idx} missing from migrated table"
+
+    # PROOF: Column generation_id exists and legacy data preserved
     cursor2.execute("PRAGMA table_info(threat_indicators)")
     cols = [r[1] for r in cursor2.fetchall()]
     assert "generation_id" in cols
 
-    cursor2.execute("SELECT generation_id FROM threat_indicators WHERE id='leg-1'")
-    row = cursor2.fetchone()
-    assert row[0] == "legacy-gen-misp"
+    cursor2.execute("SELECT generation_id FROM threat_indicators WHERE id='leg-pt-1'")
+    assert cursor2.fetchone()[0] == "legacy-gen-phishtank"
 
-    cursor2.execute("SELECT source, freshness, current_generation_id FROM threat_feed_states WHERE source='misp'")
-    state_row = cursor2.fetchone()
-    assert state_row is not None
-    assert state_row[0] == "misp"
-    assert state_row[1] == "stale"
-    assert state_row[2] == "legacy-gen-misp"
+    cursor2.execute("SELECT generation_id FROM threat_indicators WHERE id='leg-op-1'")
+    assert cursor2.fetchone()[0] == "legacy-gen-openphish"
+
+    # PROOF: ThreatFeedState reconciled truthfully
+    cursor2.execute("SELECT source, freshness, current_generation_id, last_success_at FROM threat_feed_states WHERE source='phishtank'")
+    st_pt = cursor2.fetchone()
+    assert st_pt[1] == "stale"
+    assert st_pt[2] == "legacy-gen-phishtank"
+    assert st_pt[3] is None  # Falsely fresh timestamp not fabricated
+
+    cursor2.execute("SELECT source, freshness, current_generation_id FROM threat_feed_states WHERE source='openphish'")
+    st_op = cursor2.fetchone()
+    assert st_op is not None
+    assert st_op[1] == "stale"
+    assert st_op[2] == "legacy-gen-openphish"
+
+    # 4. PROOF: Generation Coexistence (Stage duplicate indicator into new generation)
+    # Under legacy schema, inserting identical (source, indicator_type, indicator_hash) would fail with IntegrityError
+    cursor2.execute("""
+        INSERT INTO threat_indicators (id, source, generation_id, indicator_type, indicator, indicator_hash, classification, confidence, observed_at, created_at, updated_at)
+        VALUES ('staged-new-pt-1', 'phishtank', 'gen-new-stage-2026', 'url', ?, ?, 'phishing', 0.99, '2026-10-04T12:00:00Z', '2026-10-04T12:00:00Z', '2026-10-04T12:00:00Z')
+    """, (url_pt, h_pt))
+    conn2.commit()
+
+    # Verify both generations coexist in the database
+    cursor2.execute("SELECT COUNT(*) FROM threat_indicators WHERE source='phishtank' AND indicator_hash=?", (h_pt,))
+    assert cursor2.fetchone()[0] == 2, "Duplicate indicator across two generations must coexist successfully"
     conn2.close()
 
-    # 3. Test Downgrade
+    # 5. PROOF: Migration Idempotency
+    # Running upgrade head again on already-migrated database must succeed without errors
+    command.upgrade(alembic_cfg, "head")
+
+    # 6. PROOF: Downgrade to base and re-upgrade to head
     command.downgrade(alembic_cfg, "base")
     conn3 = sqlite3.connect(test_db_file)
     cursor3 = conn3.cursor()
     cursor3.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='threat_feed_states'")
     assert cursor3.fetchone() is None
+    cursor3.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='threat_indicators'")
+    downgraded_sql = cursor3.fetchone()[0]
+    assert "uq_source_type_indicator" in downgraded_sql
     conn3.close()
+
+    command.upgrade(alembic_cfg, "head")
+    conn4 = sqlite3.connect(test_db_file)
+    cursor4 = conn4.cursor()
+    cursor4.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='threat_indicators'")
+    reupgraded_sql = cursor4.fetchone()[0]
+    assert "uq_source_gen_type_indicator" in reupgraded_sql
+    assert "uq_source_type_indicator" not in reupgraded_sql
+    conn4.close()
 
 
 def test_generation_state_consistency_invariant(db_session):
