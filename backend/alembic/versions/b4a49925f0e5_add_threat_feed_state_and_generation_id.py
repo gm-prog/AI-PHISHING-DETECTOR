@@ -42,6 +42,25 @@ def upgrade() -> None:
             sa.Column("updated_at", sa.String(32), nullable=False),
         )
 
+    # 1b. Ensure scan_history columns and indexes are present
+    if "scan_history" in inspector.get_table_names():
+        scan_cols = [c["name"] for c in inspector.get_columns("scan_history")]
+        with op.batch_alter_table("scan_history") as batch_op:
+            if "user_id" not in scan_cols:
+                batch_op.add_column(sa.Column("user_id", sa.String(), sa.ForeignKey("users.id", name="fk_scan_history_user_id"), nullable=True))
+            if "guest_session_hash" not in scan_cols:
+                batch_op.add_column(sa.Column("guest_session_hash", sa.String(), nullable=True))
+
+        scan_indexes = [i["name"] for i in inspector.get_indexes("scan_history")]
+        if "ix_scan_history_id" not in scan_indexes:
+            op.create_index("ix_scan_history_id", "scan_history", ["id"])
+        if "ix_scan_history_user_id" not in scan_indexes:
+            op.create_index("ix_scan_history_user_id", "scan_history", ["user_id"])
+        if "ix_scan_history_guest_session_hash" not in scan_indexes:
+            op.create_index("ix_scan_history_guest_session_hash", "scan_history", ["guest_session_hash"])
+        if "ix_scan_history_input_type" not in scan_indexes:
+            op.create_index("ix_scan_history_input_type", "scan_history", ["input_type"])
+
     # 2. Upgrade threat_indicators if present
     if "threat_indicators" in inspector.get_table_names():
         columns = [c["name"] for c in inspector.get_columns("threat_indicators")]

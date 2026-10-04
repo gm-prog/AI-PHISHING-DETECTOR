@@ -1070,17 +1070,69 @@ async def test_realistic_legacy_database_migration_coexistence_and_lifecycle(tmp
 
 def test_runtime_schema_verification_and_fail_closed(tmp_path):
     """
-    Requirements 9, 33, 34, 35:
+    Requirements 4, 33, 34, 35:
     Prove that runtime startup validates required schema invariants without silently mutating the DB,
     and fails closed with RuntimeError on incompatible or unmigrated schemas.
     """
     from app.db import verify_schema_invariants
     import sqlite3
 
+    # 1. Non-existent file fails closed
+    non_existent = str(tmp_path / "does_not_exist.db")
+    with pytest.raises(RuntimeError, match="does not exist or is uninitialized.*alembic upgrade head"):
+        verify_schema_invariants(non_existent)
+
+    # 2. Empty 0-byte file fails closed
+    empty_file = str(tmp_path / "empty.db")
+    with open(empty_file, "w") as f:
+        pass
+    with pytest.raises(RuntimeError, match="does not exist or is uninitialized.*alembic upgrade head"):
+        verify_schema_invariants(empty_file)
+
+    # 3. Create fully valid migrated schema
     valid_db_file = str(tmp_path / "valid_test.db")
-    # Create valid migrated schema
     conn = sqlite3.connect(valid_db_file)
     cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE users (
+            id VARCHAR PRIMARY KEY,
+            email VARCHAR NOT NULL UNIQUE,
+            hashed_password VARCHAR NOT NULL,
+            role VARCHAR NOT NULL DEFAULT 'user',
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            created_at VARCHAR
+        )
+    """)
+    cursor.execute("CREATE UNIQUE INDEX ix_users_email ON users (email)")
+    cursor.execute("""
+        CREATE TABLE user_sessions (
+            id VARCHAR PRIMARY KEY,
+            user_id VARCHAR NOT NULL REFERENCES users(id),
+            session_id_hash VARCHAR NOT NULL UNIQUE,
+            created_at VARCHAR,
+            expires_at VARCHAR NOT NULL,
+            revoked_at VARCHAR
+        )
+    """)
+    cursor.execute("CREATE UNIQUE INDEX ix_user_sessions_session_id_hash ON user_sessions (session_id_hash)")
+    cursor.execute("CREATE INDEX ix_user_sessions_user_id ON user_sessions (user_id)")
+    cursor.execute("""
+        CREATE TABLE scan_history (
+            id VARCHAR PRIMARY KEY,
+            user_id VARCHAR REFERENCES users(id),
+            guest_session_hash VARCHAR,
+            timestamp VARCHAR,
+            input_type VARCHAR,
+            content VARCHAR,
+            risk_score INTEGER,
+            status VARCHAR,
+            phishing_signals JSON,
+            ai_explanation VARCHAR,
+            details JSON
+        )
+    """)
+    cursor.execute("CREATE INDEX ix_scan_history_user_id ON scan_history (user_id)")
+    cursor.execute("CREATE INDEX ix_scan_history_guest_session_hash ON scan_history (guest_session_hash)")
     cursor.execute("""
         CREATE TABLE threat_indicators (
             id VARCHAR(36) PRIMARY KEY,
@@ -1098,6 +1150,12 @@ def test_runtime_schema_verification_and_fail_closed(tmp_path):
             CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash)
         )
     """)
+    cursor.execute("CREATE INDEX ix_threat_indicators_source ON threat_indicators (source)")
+    cursor.execute("CREATE INDEX ix_threat_indicators_indicator_type ON threat_indicators (indicator_type)")
+    cursor.execute("CREATE INDEX ix_threat_indicators_indicator_hash ON threat_indicators (indicator_hash)")
+    cursor.execute("CREATE INDEX ix_threat_indicators_classification ON threat_indicators (classification)")
+    cursor.execute("CREATE INDEX ix_threat_indicators_expires_at ON threat_indicators (expires_at)")
+    cursor.execute("CREATE INDEX ix_threat_indicators_generation_id ON threat_indicators (generation_id)")
     cursor.execute("""
         CREATE TABLE threat_feed_states (
             source VARCHAR(64) PRIMARY KEY,
@@ -1115,24 +1173,209 @@ def test_runtime_schema_verification_and_fail_closed(tmp_path):
             updated_at VARCHAR(32) NOT NULL
         )
     """)
-    cursor.execute("""
-        CREATE TABLE scan_history (
-            id VARCHAR PRIMARY KEY,
-            user_id VARCHAR,
-            guest_session_hash VARCHAR
-        )
-    """)
     conn.commit()
     conn.close()
 
-    # Valid schema passes validation
+    # Valid schema passes validation cleanly
     verify_schema_invariants(valid_db_file)
 
-    # Incompatible schema (nullable generation_id) fails closed
-    incompat_db_file = str(tmp_path / "incompat_test.db")
-    conn2 = sqlite3.connect(incompat_db_file)
+    # 4. Incompatible schema: missing threat_feed_states table fails closed
+    incompat_db_missing_table = str(tmp_path / "incompat_missing_tbl.db")
+    conn2 = sqlite3.connect(incompat_db_missing_table)
+    c2 = conn2.cursor()
+    c2.execute("CREATE TABLE users (id VARCHAR PRIMARY KEY, email VARCHAR NOT NULL, hashed_password VARCHAR NOT NULL, role VARCHAR NOT NULL, is_active BOOLEAN NOT NULL)")
+    conn2.commit()
+    conn2.close()
+    with pytest.raises(RuntimeError, match="missing required table"):
+        verify_schema_invariants(incompat_db_missing_table)
+
+    # 5. Incompatible schema: scan_history missing guest_session_hash index fails closed
+    incompat_db_scan = str(tmp_path / "incompat_scan.db")
+    conn3 = sqlite3.connect(incompat_db_scan)
+    c3 = conn3.cursor()
+    c3.execute("CREATE TABLE users (id VARCHAR PRIMARY KEY, email VARCHAR NOT NULL, hashed_password VARCHAR NOT NULL, role VARCHAR NOT NULL, is_active BOOLEAN NOT NULL)")
+    c3.execute("CREATE TABLE user_sessions (id VARCHAR PRIMARY KEY, user_id VARCHAR NOT NULL, session_id_hash VARCHAR NOT NULL, expires_at VARCHAR NOT NULL)")
+    c3.execute("CREATE TABLE scan_history (id VARCHAR PRIMARY KEY, timestamp VARCHAR, input_type VARCHAR, content VARCHAR, risk_score INTEGER, status VARCHAR)") # missing user_id
+    c3.execute("""
+        CREATE TABLE threat_indicators (
+            id VARCHAR(36) PRIMARY KEY, source VARCHAR(64) NOT NULL, indicator_type VARCHAR(32) NOT NULL, indicator VARCHAR(2048) NOT NULL,
+            indicator_hash VARCHAR(64) NOT NULL, classification VARCHAR(64) NOT NULL, confidence FLOAT NOT NULL, observed_at VARCHAR(32) NOT NULL,
+            generation_id VARCHAR(36) NOT NULL, created_at VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL,
+            CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash)
+        )
+    """)
+    c3.execute("CREATE TABLE threat_feed_states (source VARCHAR(64) PRIMARY KEY, enabled BOOLEAN NOT NULL, status VARCHAR(32) NOT NULL, freshness VARCHAR(32) NOT NULL, current_generation_id VARCHAR(36), refresh_interval_seconds INTEGER NOT NULL, updated_at VARCHAR(32) NOT NULL)")
+    conn3.commit()
+    conn3.close()
+    with pytest.raises(RuntimeError, match="missing column.*in 'scan_history'"):
+        verify_schema_invariants(incompat_db_scan)
+
+    # 6. Incompatible schema: threat_indicators with nullable generation_id fails closed
+    incompat_db_gen = str(tmp_path / "incompat_gen.db")
+    conn4 = sqlite3.connect(incompat_db_gen)
+    c4 = conn4.cursor()
+    c4.execute("CREATE TABLE users (id VARCHAR PRIMARY KEY, email VARCHAR NOT NULL, hashed_password VARCHAR NOT NULL, role VARCHAR NOT NULL, is_active BOOLEAN NOT NULL)")
+    c4.execute("CREATE TABLE user_sessions (id VARCHAR PRIMARY KEY, user_id VARCHAR NOT NULL, session_id_hash VARCHAR NOT NULL, expires_at VARCHAR NOT NULL)")
+    c4.execute("CREATE TABLE scan_history (id VARCHAR PRIMARY KEY, user_id VARCHAR, guest_session_hash VARCHAR, timestamp VARCHAR, input_type VARCHAR, content VARCHAR, risk_score INTEGER, status VARCHAR)")
+    c4.execute("CREATE INDEX ix_scan_history_user_id ON scan_history (user_id)")
+    c4.execute("CREATE INDEX ix_scan_history_guest_session_hash ON scan_history (guest_session_hash)")
+    c4.execute("""
+        CREATE TABLE threat_indicators (
+            id VARCHAR(36) PRIMARY KEY, source VARCHAR(64) NOT NULL, indicator_type VARCHAR(32) NOT NULL, indicator VARCHAR(2048) NOT NULL,
+            indicator_hash VARCHAR(64) NOT NULL, classification VARCHAR(64) NOT NULL, confidence FLOAT NOT NULL, observed_at VARCHAR(32) NOT NULL,
+            generation_id VARCHAR(36), -- Nullable!
+            created_at VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL,
+            CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash)
+        )
+    """)
+    c4.execute("CREATE TABLE threat_feed_states (source VARCHAR(64) PRIMARY KEY, enabled BOOLEAN NOT NULL, status VARCHAR(32) NOT NULL, freshness VARCHAR(32) NOT NULL, current_generation_id VARCHAR(36), refresh_interval_seconds INTEGER NOT NULL, updated_at VARCHAR(32) NOT NULL)")
+    conn4.commit()
+    conn4.close()
+    with pytest.raises(RuntimeError, match="generation_id' must be NOT NULL"):
+        verify_schema_invariants(incompat_db_gen)
+
+
+def test_startup_schema_verification_immutability(tmp_path):
+    """
+    Requirement 5C: Startup Immutability
+    Prove that calling verify_schema_invariants() does not modify schema DDLs or table data.
+    """
+    import os
+    import sqlite3
+    from alembic.config import Config
+    from alembic import command
+    from app.db import verify_schema_invariants
+
+    immut_db_file = str(tmp_path / "immut_test.db")
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ini_path = os.path.join(backend_dir, "alembic.ini")
+    alembic_cfg = Config(ini_path)
+    alembic_cfg.set_main_option("sqlalchemy.url", f"sqlite:///{immut_db_file}")
+    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+
+    command.upgrade(alembic_cfg, "head")
+
+    # Insert test data across all tables
+    conn = sqlite3.connect(immut_db_file)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO users (id, email, hashed_password, role, is_active) VALUES ('u1', 'test@example.com', 'hash', 'user', 1)")
+    cursor.execute("INSERT INTO user_sessions (id, user_id, session_id_hash, expires_at) VALUES ('s1', 'u1', 'hash123', '2026-10-05T00:00:00Z')")
+    cursor.execute("INSERT INTO scan_history (id, user_id, guest_session_hash, timestamp, input_type, content, risk_score, status) VALUES ('h1', 'u1', NULL, '2026-10-04T00:00:00Z', 'url', 'https://example.com', 0, 'safe')")
+    cursor.execute("INSERT INTO threat_indicators (id, source, indicator_type, indicator, indicator_hash, classification, confidence, observed_at, generation_id, created_at, updated_at) VALUES ('ti1', 'phishtank', 'url', 'https://bad.com', 'hbad', 'phishing', 1.0, '2026-10-04T00:00:00Z', 'gen1', '2026-10-04T00:00:00Z', '2026-10-04T00:00:00Z')")
+    cursor.execute("INSERT INTO threat_feed_states (source, enabled, status, freshness, current_generation_id, refresh_interval_seconds, updated_at) VALUES ('phishtank', 1, 'idle', 'fresh', 'gen1', 86400, '2026-10-04T00:00:00Z')")
+    conn.commit()
+
+    # Capture schema and data state before verification
+    cursor.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+    schema_before = cursor.fetchall()
+
+    row_counts_before = {}
+    for tbl in ["users", "user_sessions", "scan_history", "threat_indicators", "threat_feed_states"]:
+        cursor.execute(f"SELECT COUNT(*) FROM {tbl}")
+        row_counts_before[tbl] = cursor.fetchone()[0]
+    conn.close()
+
+    # Call verify_schema_invariants multiple times
+    for _ in range(3):
+        verify_schema_invariants(immut_db_file)
+
+    # Capture schema and data state after verification
+    conn2 = sqlite3.connect(immut_db_file)
     cursor2 = conn2.cursor()
-    cursor2.execute("""
+    cursor2.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+    schema_after = cursor2.fetchall()
+
+    row_counts_after = {}
+    for tbl in ["users", "user_sessions", "scan_history", "threat_indicators", "threat_feed_states"]:
+        cursor2.execute(f"SELECT COUNT(*) FROM {tbl}")
+        row_counts_after[tbl] = cursor2.fetchone()[0]
+    conn2.close()
+
+    assert schema_before == schema_after, "verify_schema_invariants must NOT mutate database schema DDL"
+    assert row_counts_before == row_counts_after, "verify_schema_invariants must NOT mutate or delete database rows"
+
+
+def test_alembic_import_decoupling_and_bootstrapping(tmp_path):
+    """
+    Requirement 5B: Alembic Bootstrapping & Import Decoupling
+    Prove that importing app.db, app.models.domain, and running Alembic migrations
+    works seamlessly on an unmigrated or empty database without triggering premature validation errors.
+    """
+    import os
+    import importlib
+    from alembic.config import Config
+    from alembic import command
+    from app.db import verify_schema_invariants
+
+    unmigrated_db = str(tmp_path / "unmigrated.db")
+
+    # Importing app.db or app.models.domain must NOT raise RuntimeError
+    import app.db
+    import app.models.domain
+    importlib.reload(app.db)
+    importlib.reload(app.models.domain)
+
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ini_path = os.path.join(backend_dir, "alembic.ini")
+    alembic_cfg = Config(ini_path)
+    alembic_cfg.set_main_option("sqlalchemy.url", f"sqlite:///{unmigrated_db}")
+    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+
+    # Upgrade to head should succeed cleanly
+    command.upgrade(alembic_cfg, "head")
+
+    # After upgrade, runtime invariant verification should pass
+    verify_schema_invariants(unmigrated_db)
+
+
+def test_real_legacy_database_with_legacy_scan_history_upgrade_and_invariants(tmp_path):
+    """
+    Requirement 5A: Real Legacy Upgrade with Legacy scan_history & threat_indicators
+    1. Create a realistic pre-Alembic database with:
+       - legacy scan_history lacking user_id and guest_session_hash, containing existing scan records
+       - legacy threat_indicators with uq_source_type_indicator, generation_id absent, containing existing indicators
+       - legacy users table
+       - missing threat_feed_states
+    2. Run command.upgrade(alembic_cfg, "head")
+    3. Verify:
+       - Existing scan_history records preserved intact
+       - user_id and guest_session_hash columns and indexes added
+       - threat_indicators upgraded with generation_id NOT NULL and uq_source_gen_type_indicator
+       - threat_feed_states created with truthful stale state
+       - verify_schema_invariants passes cleanly
+    """
+    import os
+    import sqlite3
+    from alembic.config import Config
+    from alembic import command
+    from app.db import verify_schema_invariants
+
+    legacy_db_file = str(tmp_path / "legacy_full_test.db")
+    conn = sqlite3.connect(legacy_db_file)
+    cursor = conn.cursor()
+
+    # Create pre-Alembic legacy scan_history table (no user_id, no guest_session_hash)
+    cursor.execute("""
+        CREATE TABLE scan_history (
+            id VARCHAR PRIMARY KEY,
+            timestamp VARCHAR,
+            input_type VARCHAR,
+            content VARCHAR,
+            risk_score INTEGER,
+            status VARCHAR,
+            phishing_signals JSON,
+            ai_explanation VARCHAR,
+            details JSON
+        )
+    """)
+    cursor.execute("""
+        INSERT INTO scan_history (id, timestamp, input_type, content, risk_score, status)
+        VALUES ('legacy-scan-1', '2026-01-01T00:00:00Z', 'url', 'https://legacy-check.com', 45, 'warning'),
+               ('legacy-scan-2', '2026-01-02T00:00:00Z', 'email', 'Urgent update required', 85, 'danger')
+    """)
+
+    # Create pre-Alembic legacy threat_indicators table (no generation_id, legacy unique constraint)
+    cursor.execute("""
         CREATE TABLE threat_indicators (
             id VARCHAR(36) PRIMARY KEY,
             source VARCHAR(64) NOT NULL,
@@ -1143,17 +1386,84 @@ def test_runtime_schema_verification_and_fail_closed(tmp_path):
             confidence FLOAT NOT NULL,
             observed_at VARCHAR(32) NOT NULL,
             expires_at VARCHAR(32),
-            generation_id VARCHAR(36), -- Nullable!
             created_at VARCHAR(32) NOT NULL,
             updated_at VARCHAR(32) NOT NULL,
-            CONSTRAINT uq_source_gen_type_indicator UNIQUE (source, generation_id, indicator_type, indicator_hash)
+            CONSTRAINT uq_source_type_indicator UNIQUE (source, indicator_type, indicator_hash)
         )
     """)
-    conn2.commit()
+    cursor.execute("""
+        INSERT INTO threat_indicators (id, source, indicator_type, indicator, indicator_hash, classification, confidence, observed_at, created_at, updated_at)
+        VALUES ('ti-leg-1', 'phishtank', 'url', 'https://leg-pt.com', 'h_leg_pt', 'phishing', 1.0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+               ('ti-leg-2', 'openphish', 'url', 'https://leg-op.com', 'h_leg_op', 'phishing', 0.8, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+    """)
+
+    # Create pre-Alembic legacy users table
+    cursor.execute("""
+        CREATE TABLE users (
+            id VARCHAR PRIMARY KEY,
+            email VARCHAR NOT NULL UNIQUE,
+            hashed_password VARCHAR NOT NULL,
+            role VARCHAR NOT NULL DEFAULT 'user',
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            created_at VARCHAR
+        )
+    """)
+    cursor.execute("INSERT INTO users (id, email, hashed_password) VALUES ('u-legacy-1', 'admin@example.com', 'secret_hash')")
+    conn.commit()
+    conn.close()
+
+    # Run Alembic upgrade head
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ini_path = os.path.join(backend_dir, "alembic.ini")
+    alembic_cfg = Config(ini_path)
+    alembic_cfg.set_main_option("sqlalchemy.url", f"sqlite:///{legacy_db_file}")
+    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+
+    command.upgrade(alembic_cfg, "head")
+
+    # Verify preserved data in scan_history
+    conn2 = sqlite3.connect(legacy_db_file)
+    cursor2 = conn2.cursor()
+    cursor2.execute("SELECT id, content, risk_score, user_id, guest_session_hash FROM scan_history ORDER BY id")
+    scans = cursor2.fetchall()
+    assert len(scans) == 2
+    assert scans[0][0] == "legacy-scan-1"
+    assert scans[0][1] == "https://legacy-check.com"
+    assert scans[0][2] == 45
+    assert scans[0][3] is None  # user_id added as NULL for legacy records
+    assert scans[0][4] is None  # guest_session_hash added as NULL for legacy records
+
+    # Verify scan_history indexes
+    cursor2.execute("PRAGMA index_list(scan_history)")
+    scan_idx = {r[1] for r in cursor2.fetchall()}
+    assert "ix_scan_history_user_id" in scan_idx
+    assert "ix_scan_history_guest_session_hash" in scan_idx
+
+    # Verify preserved data in threat_indicators
+    cursor2.execute("SELECT id, source, generation_id FROM threat_indicators ORDER BY id")
+    ti_rows = cursor2.fetchall()
+    assert len(ti_rows) == 2
+    assert ti_rows[0] == ("ti-leg-1", "phishtank", "legacy-gen-phishtank")
+    assert ti_rows[1] == ("ti-leg-2", "openphish", "legacy-gen-openphish")
+
+    # Verify threat_indicators constraints and NOT NULL
+    cursor2.execute("PRAGMA table_info(threat_indicators)")
+    cols_map = {r[1]: r for r in cursor2.fetchall()}
+    assert cols_map["generation_id"][3] == 1, "generation_id must be NOT NULL"
+
+    cursor2.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='threat_indicators'")
+    ti_sql = cursor2.fetchone()[0]
+    assert "uq_source_gen_type_indicator" in ti_sql
+    assert "uq_source_type_indicator" not in ti_sql
+
+    # Verify threat_feed_states
+    cursor2.execute("SELECT source, freshness, current_generation_id, last_success_at FROM threat_feed_states WHERE source='phishtank'")
+    st = cursor2.fetchone()
+    assert st == ("phishtank", "stale", "legacy-gen-phishtank", None)
     conn2.close()
 
-    with pytest.raises(RuntimeError, match="generation_id' must be NOT NULL"):
-        verify_schema_invariants(incompat_db_file)
+    # Verify runtime invariants pass
+    verify_schema_invariants(legacy_db_file)
 
 
 def test_fresh_database_alembic_upgrade_and_schema_validation(tmp_path):

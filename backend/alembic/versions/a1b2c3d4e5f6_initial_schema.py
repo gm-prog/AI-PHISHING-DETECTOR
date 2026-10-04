@@ -19,10 +19,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Create initial tables: users, user_sessions, scan_history, and legacy threat_indicators."""
+    """Create or reconcile baseline tables: users, user_sessions, scan_history, and legacy threat_indicators."""
     conn = op.get_bind()
     inspector = sa.inspect(conn)
-    existing_tables = inspector.get_table_names()
+    existing_tables = set(inspector.get_table_names())
 
     # 1. users table
     if "users" not in existing_tables:
@@ -37,6 +37,12 @@ def upgrade() -> None:
         )
         op.create_index("ix_users_id", "users", ["id"])
         op.create_index("ix_users_email", "users", ["email"], unique=True)
+    else:
+        user_indexes = [i["name"] for i in inspector.get_indexes("users")]
+        if "ix_users_id" not in user_indexes:
+            op.create_index("ix_users_id", "users", ["id"])
+        if "ix_users_email" not in user_indexes:
+            op.create_index("ix_users_email", "users", ["email"], unique=True)
 
     # 2. user_sessions table
     if "user_sessions" not in existing_tables:
@@ -52,8 +58,16 @@ def upgrade() -> None:
         op.create_index("ix_user_sessions_id", "user_sessions", ["id"])
         op.create_index("ix_user_sessions_user_id", "user_sessions", ["user_id"])
         op.create_index("ix_user_sessions_session_id_hash", "user_sessions", ["session_id_hash"], unique=True)
+    else:
+        session_indexes = [i["name"] for i in inspector.get_indexes("user_sessions")]
+        if "ix_user_sessions_id" not in session_indexes:
+            op.create_index("ix_user_sessions_id", "user_sessions", ["id"])
+        if "ix_user_sessions_user_id" not in session_indexes:
+            op.create_index("ix_user_sessions_user_id", "user_sessions", ["user_id"])
+        if "ix_user_sessions_session_id_hash" not in session_indexes:
+            op.create_index("ix_user_sessions_session_id_hash", "user_sessions", ["session_id_hash"], unique=True)
 
-    # 3. scan_history table
+    # 3. scan_history table (reconciles legacy schemas lacking user_id / guest_session_hash)
     if "scan_history" not in existing_tables:
         op.create_table(
             "scan_history",
@@ -73,6 +87,23 @@ def upgrade() -> None:
         op.create_index("ix_scan_history_user_id", "scan_history", ["user_id"])
         op.create_index("ix_scan_history_guest_session_hash", "scan_history", ["guest_session_hash"])
         op.create_index("ix_scan_history_input_type", "scan_history", ["input_type"])
+    else:
+        scan_cols = [c["name"] for c in inspector.get_columns("scan_history")]
+        with op.batch_alter_table("scan_history") as batch_op:
+            if "user_id" not in scan_cols:
+                batch_op.add_column(sa.Column("user_id", sa.String(), sa.ForeignKey("users.id", name="fk_scan_history_user_id"), nullable=True))
+            if "guest_session_hash" not in scan_cols:
+                batch_op.add_column(sa.Column("guest_session_hash", sa.String(), nullable=True))
+
+        scan_indexes = [i["name"] for i in inspector.get_indexes("scan_history")]
+        if "ix_scan_history_id" not in scan_indexes:
+            op.create_index("ix_scan_history_id", "scan_history", ["id"])
+        if "ix_scan_history_user_id" not in scan_indexes:
+            op.create_index("ix_scan_history_user_id", "scan_history", ["user_id"])
+        if "ix_scan_history_guest_session_hash" not in scan_indexes:
+            op.create_index("ix_scan_history_guest_session_hash", "scan_history", ["guest_session_hash"])
+        if "ix_scan_history_input_type" not in scan_indexes:
+            op.create_index("ix_scan_history_input_type", "scan_history", ["input_type"])
 
     # 4. threat_indicators table (legacy pre-Task-3 structure)
     if "threat_indicators" not in existing_tables:
@@ -96,6 +127,29 @@ def upgrade() -> None:
         op.create_index("ix_threat_indicators_indicator_hash", "threat_indicators", ["indicator_hash"])
         op.create_index("ix_threat_indicators_classification", "threat_indicators", ["classification"])
         op.create_index("ix_threat_indicators_expires_at", "threat_indicators", ["expires_at"])
+    else:
+        threat_indexes = [i["name"] for i in inspector.get_indexes("threat_indicators")]
+        for idx_name, cols in [
+            ("ix_threat_indicators_source", ["source"]),
+            ("ix_threat_indicators_indicator_type", ["indicator_type"]),
+            ("ix_threat_indicators_indicator_hash", ["indicator_hash"]),
+            ("ix_threat_indicators_classification", ["classification"]),
+            ("ix_threat_indicators_expires_at", ["expires_at"]),
+        ]:
+            if idx_name not in threat_indexes:
+                op.create_index(idx_name, "threat_indicators", cols)
+
+
+def downgrade() -> None:
+    """Drop initial tables."""
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    existing_tables = set(inspector.get_table_names())
+
+    for table_name in ["scan_history", "user_sessions", "users", "threat_indicators"]:
+        if table_name in existing_tables:
+            op.drop_table(table_name)
+
 
 
 def downgrade() -> None:

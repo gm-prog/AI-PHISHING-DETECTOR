@@ -5,6 +5,7 @@ import secrets
 import inspect
 import re
 import logging
+from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -19,7 +20,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from app.config import settings, parse_allowed_origins
-from app.db import engine, Base, get_db
+from app.db import engine, Base, get_db, verify_schema_invariants
 from app.models.domain import User, ScanHistory
 from app.models.schemas import (
     AnalysisRequest,
@@ -69,9 +70,6 @@ from app.services.provider_guard import (
 )
 
 from datetime import datetime, timezone
-
-# Ensure database tables exist
-Base.metadata.create_all(bind=engine)
 
 # ================= SENSITIVE LOG REDACTION FILTER =================
 class SensitiveLogFilter(logging.Filter):
@@ -219,6 +217,16 @@ limiter = Limiter(
     strategy="fixed-window",
 )
 
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    """
+    Validates that the database schema is fully initialized and matches required invariants.
+    Fails closed if the database is unmigrated, missing tables/columns, or incompatible.
+    """
+    verify_schema_invariants()
+    yield
+
+
 app = FastAPI(
     title="SENTINEL AI — Threat Intelligence API",
     description="Hardened defense-in-depth phishing detection and threat analysis platform.",
@@ -226,9 +234,11 @@ app = FastAPI(
     docs_url=None if settings.ENVIRONMENT == "production" else "/docs",
     redoc_url=None if settings.ENVIRONMENT == "production" else "/redoc",
     openapi_url=None if settings.ENVIRONMENT == "production" else "/openapi.json",
+    lifespan=lifespan,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 MAX_REQUEST_BODY_BYTES = settings.MAX_REQUEST_BODY_BYTES
 

@@ -137,12 +137,17 @@ SENTINEL AI uses a decoupled, defense-in-depth threat intelligence pipeline with
 ### 4.3 Database Migration & Generation Coexistence Architecture
 
 ```text
-Legacy Schema:
+Legacy Pre-Alembic Schema:
+  scan_history: id, timestamp, input_type, content, risk_score, status, etc. (no user_id, no guest_session_hash)
   threat_indicators: UNIQUE(source, indicator_type, indicator_hash), generation_id: NULL
 
-          ↓ Alembic Batch Migration (alembic upgrade head)
+          ↓ Authoritative Alembic Batch Migration (alembic upgrade head)
 
-Migrated Schema:
+Migrated Canonical Schema:
+  scan_history:
+    - user_id: VARCHAR REFERENCES users(id) [Index: ix_scan_history_user_id]
+    - guest_session_hash: VARCHAR [Index: ix_scan_history_guest_session_hash]
+    - Preserves all historical scan records and existing columns
   threat_indicators:
     - generation_id: VARCHAR(36) NOT NULL / backfilled to 'legacy-gen-<source>'
     - UNIQUE constraint: uq_source_gen_type_indicator (source, generation_id, indicator_type, indicator_hash)
@@ -156,12 +161,21 @@ Migrated Schema:
 ```
 
 **Architectural Guarantees**:
-1. **Authoritative Migration Role**: Alembic is canonical for database evolution (`alembic upgrade head`). Application startup strictly verifies schema invariants (`verify_schema_invariants()`) and fails closed without performing runtime DDL mutations.
-2. **Deterministic Legacy Backfill & Non-Nullable Invariant**: Legacy indicators with `generation_id IS NULL` receive `legacy-gen-<source>`, and `generation_id` is enforced as `NOT NULL` across both ORM models and database schema constraints.
-3. **Truthful State Reconciliation**: `ThreatFeedState` records are reconciled with `freshness = "stale"`, `status = "idle"`, and `last_success_at = None`. While `ThreatFeedState.current_generation_id` may remain `NULL` before initial feed synchronization, `ThreatIndicator.generation_id` is strictly non-nullable.
-4. **True Generation Coexistence & Downgrade Safety**: Indicators can be staged into a new generation while identical indicators remain active in older generations. Alembic `downgrade()` detects cross-generation duplicate records and explicitly refuses destructive rollbacks, failing closed with an informative migration error without deleting data.
-5. **Bounded BZ2 Decompression, EOF & Trailing Byte Validation**: Streaming decompression enforces a 32MB compressed limit and 64MB decompressed limit in 64KB chunks. Streams must reach EOF and contain zero unexpected trailing data; truncated or malformed streams are rejected with sanitized error codes (`decompression_too_large`, `decompression_invalid`).
-6. **Concurrency & Multi-Instance Operational Contract**: Outbound provider crawls are guarded by `threat_feed_semaphore` (concurrency cap = 2) and process-local per-source mutex locks. Note: In multi-instance cluster deployments, an external distributed lock (e.g. Redis-based Redlock) is required to coordinate crawler execution across worker nodes.
+1. **Sole Schema Evolution Authority**: Alembic is the single source of truth for database DDL/DML evolution (`alembic upgrade head`). `Base.metadata.create_all()` is removed from production runtime startup.
+2. **Decoupled Import & Startup Pipeline**: Importing `app.db` or domain models does not execute schema checks. Application startup follows a strict three-phase contract:
+   ```text
+   Alembic migration (alembic upgrade head)
+           ↓
+   Read-only invariant verification (lifespan hook via verify_schema_invariants())
+           ↓
+   FastAPI application startup
+   ```
+   If the schema is missing, uninitialized, or incompatible, startup fails closed with an actionable error.
+3. **Legacy Scan History & Indicator Reconciliation**: Pre-Alembic databases with legacy `scan_history` (missing ownership fields) and legacy `threat_indicators` (missing `generation_id`) are upgraded idempotently. Historical records are preserved, deterministic `legacy-gen-<source>` identifiers are assigned, and `threat_feed_states` are initialized truthfully with `freshness = "stale"` and `last_success_at = None`.
+4. **Strictly Read-Only Runtime Invariant Verification**: `verify_schema_invariants()` uses read-only PRAGMA and SQLite metadata inspections to validate table existence (`users`, `user_sessions`, `scan_history`, `threat_indicators`, `threat_feed_states`), NOT NULL column constraints, unique constraints (`uq_source_gen_type_indicator`), and functional indexes without executing runtime mutations.
+5. **True Generation Coexistence & Downgrade Safety**: Indicators can be staged into a new generation while identical indicators remain active in older generations. Alembic `downgrade()` detects cross-generation duplicate records and explicitly refuses destructive rollbacks, failing closed with an informative migration error without deleting data.
+6. **Bounded BZ2 Decompression, EOF & Trailing Byte Validation**: Streaming decompression enforces a 32MB compressed limit and 64MB decompressed limit in 64KB chunks. Streams must reach EOF and contain zero unexpected trailing data; truncated or malformed streams are rejected with sanitized error codes (`decompression_too_large`, `decompression_invalid`).
+7. **Concurrency & Multi-Instance Operational Contract**: Outbound provider crawls are guarded by `threat_feed_semaphore` (concurrency cap = 2) and process-local per-source mutex locks. Note: In multi-instance cluster deployments, an external distributed lock (e.g. Redis-based Redlock) is required to coordinate crawler execution across worker nodes.
 
 ### 4.2 Standards-Aware Email Authentication & Provenance Boundary
 

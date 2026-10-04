@@ -7,7 +7,7 @@
 ---
 
 ## 1. Executive Summary
-A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, standards-aware email authentication parsing (RFC 8601/7601/7208/6376/7489) deployed with trusted authserv-id boundaries and zero raw header persistence, Google Web Risk bounded caching deployed with upstream-aware lifetime guarantees, dynamic threat feed foundation with indexed SHA-256 deduplication and deterministic multi-source classification integrated, production threat feed connectors (PhishTank, OpenPhish, MISP), authoritative Alembic database migrations with legacy unique constraint removal, generation_id NOT NULL enforcement, fail-closed unsafe downgrade protection, bounded BZ2 decompression with EOF and trailing-byte validation, and all 110 backend tests executed with a 100% pass rate.
+A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, standards-aware email authentication parsing (RFC 8601/7601/7208/6376/7489) deployed with trusted authserv-id boundaries and zero raw header persistence, Google Web Risk bounded caching deployed with upstream-aware lifetime guarantees, dynamic threat feed foundation with indexed SHA-256 deduplication and deterministic multi-source classification integrated, production threat feed connectors (PhishTank, OpenPhish, MISP), authoritative Alembic database migrations with legacy scan_history and unique constraint reconciliation, generation_id NOT NULL enforcement, fail-closed unsafe downgrade protection, decoupled import with read-only startup invariant verification, bounded BZ2 decompression with EOF and trailing-byte validation, and all 113 backend tests executed with a 100% pass rate.
 
 ---
 
@@ -67,18 +67,18 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 ============================= test session starts ==============================
 platform linux -- Python 3.11.2, pytest-9.1.1, pluggy-1.6.0
 rootdir: /home/user/AI-PHISHING-DETECTOR/backend
-plugins: platformdirs-4.12.3, anyio-4.15.1, asyncio-1.4.0
+plugins: anyio-4.15.1, asyncio-1.4.0
 asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 110 items
+collected 113 items
 
 test_backend.py ..                                                       [  1%]
 tests/test_email_auth.py ......................                          [ 21%]
-tests/test_security_hardening.py ....................................... [ 57%]
-......                                                                   [ 62%]
-tests/test_threat_feeds.py .........................                     [ 85%]
+tests/test_security_hardening.py ....................................... [ 55%]
+......                                                                   [ 61%]
+tests/test_threat_feeds.py ............................                  [ 85%]
 tests/test_webrisk.py ................                                   [100%]
 
-======================= 110 passed, 3 warnings in 16.06s =======================
+======================= 113 passed, 3 warnings in 17.39s =======================
 ```
 
 ---
@@ -106,4 +106,4 @@ tests/test_webrisk.py ................                                   [100%]
 | **17. Secure Auth Sessions** | Implemented | `backend/app/auth.py` (Opaque Session Cookies, bcrypt) | VERIFIED (`test_user_registration_and_login`) |
 | **18. Scan Dependencies** | Implemented | `npm audit` & `pip-audit` package verification | VERIFIED |
 | **19. Test Record Access** | Implemented | `backend/app/main.py` (`delete_history`) | VERIFIED (`test_scoped_history_bulk_clear`) |
-| **20. Attack Your Own App** | Implemented | `backend/tests/` (110 test specifications) | VERIFIED (110/110 Passed) |
+| **20. Attack Your Own App** | Implemented | `backend/tests/` (113 test specifications) | VERIFIED (113/113 Passed) |
