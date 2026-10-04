@@ -25,6 +25,11 @@ class TTLCache:
             return value
 
     async def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+        if ttl_seconds is not None and ttl_seconds <= 0:
+            async with self._lock:
+                self._items.pop(key, None)
+            return
+
         async with self._lock:
             now = time.monotonic()
             effective_ttl = ttl_seconds if (ttl_seconds is not None and ttl_seconds > 0) else self.ttl_seconds

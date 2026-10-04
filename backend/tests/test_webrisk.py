@@ -433,29 +433,53 @@ def test_webrisk_cache_real_pipeline_orchestration(test_client, monkeypatch):
 def test_webrisk_provider_aware_cache_ttl():
     """
     Test Goal A4: Verify provider-aware cache TTL calculation:
-    - Valid RFC3339 expireTime returns remaining seconds bounded by [min_ttl, max_ttl].
-    - Missing or malformed expireTime falls back safely to default 600s.
+    - Valid RFC3339 expireTime returns remaining seconds bounded by max_ttl (600s).
+    - If expireTime is in near future (e.g. 10s), TTL is never inflated past remaining seconds (<= 10s).
+    - If expireTime is in the past, TTL is 0 (immediate expiration, not cached).
+    - Invariant: effective TTL is never greater than upstream provider remaining lifetime.
+    - Missing or malformed expireTime falls back safely to conservative default 600s.
     """
     now = datetime.now(timezone.utc)
 
     # 1. Future expireTime in 300 seconds
     expire_in_300 = (now + timedelta(seconds=300)).isoformat()
     ttl_300 = _calculate_effective_ttl(expire_in_300)
-    assert 295 <= ttl_300 <= 305
+    assert 295 <= ttl_300 <= 300
+    assert ttl_300 <= 300  # Invariant
 
     # 2. Far future expireTime (> 600s) is capped at max_ttl (600s)
     expire_in_10000 = (now + timedelta(seconds=10000)).isoformat()
     ttl_capped = _calculate_effective_ttl(expire_in_10000)
     assert ttl_capped == 600
 
-    # 3. Near past or tiny future is bounded by min_ttl (60s)
+    # 3. Near future (10s) must NEVER be inflated past upstream validity
     expire_in_10 = (now + timedelta(seconds=10)).isoformat()
-    ttl_min = _calculate_effective_ttl(expire_in_10)
-    assert ttl_min == 60
+    ttl_10 = _calculate_effective_ttl(expire_in_10)
+    assert 0 < ttl_10 <= 10
+    assert ttl_10 <= 10  # Invariant
 
-    # 4. None or malformed returns default 600s
+    # 4. Expired in past (e.g. 5 seconds ago) must return 0
+    expire_in_past = (now - timedelta(seconds=5)).isoformat()
+    ttl_expired = _calculate_effective_ttl(expire_in_past)
+    assert ttl_expired == 0
+
+    # 5. None or malformed returns bounded default 600s
     assert _calculate_effective_ttl(None) == 600
     assert _calculate_effective_ttl("invalid-date-string") == 600
+
+
+@pytest.mark.asyncio
+async def test_ttl_cache_zero_or_negative_ttl_not_stored():
+    """Verify that setting an item with ttl_seconds <= 0 does not store or immediately invalidates it."""
+    test_key = "webrisk:expired_test_key"
+    await webrisk_cache.set(test_key, {"in_database": True}, ttl_seconds=0)
+    res = await webrisk_cache.get(test_key)
+    assert res is None
+
+    # Setting negative TTL
+    await webrisk_cache.set(test_key, {"in_database": True}, ttl_seconds=-10)
+    res_neg = await webrisk_cache.get(test_key)
+    assert res_neg is None
 
 
 def test_webrisk_provider_non_fatal_on_failure(test_client, monkeypatch):

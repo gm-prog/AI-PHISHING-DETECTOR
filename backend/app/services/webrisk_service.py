@@ -24,18 +24,29 @@ SUPPORTED_THREAT_TYPES = [
 ]
 
 
-def _calculate_effective_ttl(expire_time_str: Optional[str], default_ttl: int = 600, max_ttl: int = 600, min_ttl: int = 60) -> int:
-    """Calculate bounded TTL in seconds from upstream RFC3339 expireTime."""
+def _calculate_effective_ttl(expire_time_str: Optional[str], default_ttl: int = 600, max_ttl: int = 600) -> int:
+    """
+    Calculate bounded TTL in seconds from upstream RFC3339 expireTime.
+
+    Guarantees that effective TTL never exceeds remaining upstream validity:
+    - If expire_time_str is present and valid: min(max(0, remaining_seconds), max_ttl).
+      Expired timestamps (remaining <= 0) return 0 (not retained in cache).
+    - If expire_time_str is missing or unparseable: defaults to bounded default_ttl.
+    """
     if not expire_time_str or not isinstance(expire_time_str, str):
         return default_ttl
     try:
-        clean_iso = expire_time_str.strip().replace("Z", "+00:00")
+        clean_iso = expire_time_str.strip()
+        if clean_iso.endswith("Z"):
+            clean_iso = clean_iso[:-1] + "+00:00"
         exp_dt = datetime.fromisoformat(clean_iso)
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
         now_dt = datetime.now(timezone.utc)
-        diff_seconds = int((exp_dt - now_dt).total_seconds())
-        if diff_seconds < min_ttl:
-            return min_ttl
-        return min(max_ttl, diff_seconds)
+        remaining_seconds = int((exp_dt - now_dt).total_seconds())
+        if remaining_seconds <= 0:
+            return 0
+        return min(max_ttl, remaining_seconds)
     except Exception:
         return default_ttl
 
