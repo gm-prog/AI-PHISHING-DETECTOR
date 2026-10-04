@@ -87,6 +87,18 @@ class ThreatFeedProvider(Protocol):
         ...
 
 
+_source_locks: Dict[str, asyncio.Lock] = {}
+_source_locks_guard = asyncio.Lock()
+
+
+async def get_source_refresh_lock(source_name: str) -> asyncio.Lock:
+    """Returns per-source mutex to prevent concurrent refresh races on the same feed source."""
+    async with _source_locks_guard:
+        if source_name not in _source_locks:
+            _source_locks[source_name] = asyncio.Lock()
+        return _source_locks[source_name]
+
+
 async def bounded_fetch_stream(
     session: aiohttp.ClientSession,
     url: str,
@@ -110,8 +122,7 @@ async def bounded_fetch_stream(
         params=params,
         json=json_body,
         timeout=timeout,
-        allow_redirects=True,
-        max_redirects=5,
+        allow_redirects=False,
     ) as response:
         status = response.status
         resp_headers = {k.lower(): v for k, v in response.headers.items()}
@@ -140,9 +151,10 @@ class PhishTankFeedProvider:
     indicator_types = ["url"]
     supports_etag = True
     supports_last_modified = True
-    default_refresh_interval_seconds = 86400
+    default_refresh_interval_seconds = 7200
     fetch_limit = 10000
     is_enabled = True
+    allow_empty_snapshot = False
 
     def __init__(self, api_key: Optional[str] = None, feed_url: Optional[str] = None):
         self.api_key = api_key or settings.PHISHTANK_API_KEY
@@ -155,7 +167,7 @@ class PhishTankFeedProvider:
         last_modified: Optional[str] = None,
     ) -> Tuple[List[NormalizedThreatIndicator], Optional[str], Optional[str], bool]:
         headers = {
-            "User-Agent": "SENTINEL-ThreatIntel/1.0 (PhishingDetector; security@sentinel.local)",
+            "User-Agent": "phishtank/sentinel-ai (PhishingDetector; security@sentinel.local)",
             "Accept": "application/json",
         }
         if etag:
@@ -163,14 +175,19 @@ class PhishTankFeedProvider:
         if last_modified:
             headers["If-Modified-Since"] = last_modified
 
+        target_url = self.feed_url
         params = {}
         if self.api_key and self.api_key.strip():
-            params["app_key"] = self.api_key.strip()
+            clean_key = self.api_key.strip()
+            if target_url == "http://data.phishtank.com/data/online-valid.json":
+                target_url = f"http://data.phishtank.com/data/{clean_key}/online-valid.json"
+            else:
+                params["app_key"] = clean_key
 
         async with aiohttp.ClientSession() as session:
             status, body, resp_headers = await bounded_fetch_stream(
                 session,
-                self.feed_url,
+                target_url,
                 headers=headers,
                 params=params if params else None,
                 max_bytes=settings.THREAT_FEED_MAX_RESPONSE_BYTES,
@@ -203,9 +220,13 @@ class PhishTankFeedProvider:
                 if not raw_url or not isinstance(raw_url, str):
                     continue
 
-                verified = str(item.get("verified", "yes")).lower()
-                online = str(item.get("online", "yes")).lower()
-                if verified not in ("yes", "true", "1") or online not in ("yes", "true", "1"):
+                raw_verified = item.get("verified")
+                raw_online = item.get("online")
+                if raw_verified is None or raw_online is None:
+                    continue
+                v_str = str(raw_verified).lower()
+                o_str = str(raw_online).lower()
+                if v_str not in ("yes", "true", "1", "y") or o_str not in ("yes", "true", "1", "y"):
                     continue
 
                 clean_url, _ = normalize_indicator_value("url", raw_url)
@@ -240,9 +261,10 @@ class OpenPhishFeedProvider:
     indicator_types = ["url"]
     supports_etag = True
     supports_last_modified = True
-    default_refresh_interval_seconds = 86400
+    default_refresh_interval_seconds = 21600
     fetch_limit = 10000
     is_enabled = True
+    allow_empty_snapshot = False
 
     def __init__(self, feed_url: Optional[str] = None):
         self.feed_url = feed_url or settings.OPENPHISH_FEED_URL
@@ -254,7 +276,7 @@ class OpenPhishFeedProvider:
         last_modified: Optional[str] = None,
     ) -> Tuple[List[NormalizedThreatIndicator], Optional[str], Optional[str], bool]:
         headers = {
-            "User-Agent": "SENTINEL-ThreatIntel/1.0 (PhishingDetector; security@sentinel.local)",
+            "User-Agent": "SENTINEL-ThreatIntel/1.0 (OpenPhish Community Feed; security@sentinel.local)",
             "Accept": "text/plain",
         }
         if etag:
@@ -323,6 +345,7 @@ class MISPFeedProvider:
     supports_last_modified = False
     default_refresh_interval_seconds = 86400
     fetch_limit = 5000
+    allow_empty_snapshot = False
 
     def __init__(self, api_key: Optional[str] = None, server_url: Optional[str] = None):
         self.api_key = api_key if api_key is not None else settings.MISP_API_KEY
@@ -377,6 +400,50 @@ class MISPFeedProvider:
 
             indicators: List[NormalizedThreatIndicator] = []
             now_iso = datetime.now(timezone.utc).isoformat()
+
+            for attr in response_attr:
+                if len(indicators) >= limit:
+                    break
+                if not isinstance(attr, dict):
+                    continue
+
+                attr_type = attr.get("type", "")
+                raw_val = attr.get("value", "")
+                if not raw_val or not isinstance(raw_val, str):
+                    continue
+
+                if attr_type == "url":
+                    ind_type = "url"
+                elif attr_type == "domain":
+                    ind_type = "domain"
+                elif attr_type in ("ip-dst", "ip"):
+                    ind_type = "ip"
+                elif attr_type in ("sha256", "md5", "sha1"):
+                    ind_type = "hash"
+                else:
+                    continue
+
+                clean_val, _ = normalize_indicator_value(ind_type, raw_val)
+                if not clean_val:
+                    continue
+
+                category = str(attr.get("category", "")).lower()
+                classification = "phishing" if "phish" in category else ("malware" if "payload" in category or "malware" in category else "suspicious")
+                obs = parse_and_normalize_utc_iso(attr.get("timestamp")) or now_iso
+
+                indicators.append(
+                    NormalizedThreatIndicator(
+                        source="misp",
+                        indicator_type=ind_type,
+                        indicator=clean_val,
+                        classification=classification,
+                        confidence=0.9,
+                        observed_at=obs,
+                        metadata={"category": category, "event_id": attr.get("event_id")},
+                    )
+                )
+
+            return indicators, None, None, False
 
             type_mapping = {
                 "url": "url",
@@ -541,6 +608,13 @@ def compute_freshness(
     """
     Computes deterministic freshness status:
     'disabled' | 'never_synced' | 'fresh' | 'stale' | 'expired' | 'failed'
+    Contract:
+    - fresh: elapsed <= 2 * refresh_interval
+    - stale: 2 * interval < elapsed <= 4 * interval
+    - expired: elapsed > 4 * interval
+    - never_synced: no success, no error
+    - failed: no success, error recorded
+    - disabled: enabled is False
     """
     if not enabled:
         return "disabled"
@@ -555,9 +629,9 @@ def compute_freshness(
         now_dt = datetime.now(timezone.utc)
         elapsed = (now_dt - succ_dt).total_seconds()
 
-        if elapsed <= refresh_interval_seconds * 1.5:
+        if elapsed <= refresh_interval_seconds * 2.0:
             return "fresh"
-        elif elapsed <= refresh_interval_seconds * 3.0:
+        elif elapsed <= refresh_interval_seconds * 4.0:
             return "stale"
         else:
             return "expired"
@@ -572,26 +646,28 @@ def get_all_feed_states(db: Session) -> List[Dict[str, Any]]:
     """
     providers = get_registered_providers()
     states_dict = {s.source: s for s in db.query(ThreatFeedState).all()}
-    
-    # Compute active indicator counts per source
-    counts_query = db.query(
-        ThreatIndicator.source, func.count(ThreatIndicator.id)
-    ).group_by(ThreatIndicator.source).all()
-    counts_dict = {source: count for source, count in counts_query}
 
     result = []
     for source_name, provider in providers.items():
         state = states_dict.get(source_name)
         enabled = getattr(provider, "is_enabled", True)
-        
+
         last_success = state.last_success_at if state else None
         last_attempt = state.last_attempt_at if state else None
         last_error = state.last_error if state else None
         status = state.status if state else ("idle" if enabled else "disabled")
         interval = state.refresh_interval_seconds if state else getattr(provider, "default_refresh_interval_seconds", 86400)
-        
+        curr_gen = state.current_generation_id if state else None
+
+        count = 0
+        if curr_gen:
+            count = db.query(func.count(ThreatIndicator.id)).filter(
+                ThreatIndicator.source == source_name,
+                ThreatIndicator.generation_id == curr_gen,
+            ).scalar() or 0
+
         freshness = compute_freshness(last_success, last_attempt, last_error, interval, enabled)
-        
+
         result.append({
             "source": source_name,
             "enabled": enabled,
@@ -599,7 +675,8 @@ def get_all_feed_states(db: Session) -> List[Dict[str, Any]]:
             "freshness": freshness,
             "last_success_at": last_success,
             "last_attempt_at": last_attempt,
-            "indicator_count": counts_dict.get(source_name, 0),
+            "indicator_count": count,
+            "current_generation_id": curr_gen,
             "last_error_code": last_error,
         })
 
@@ -609,7 +686,7 @@ def get_all_feed_states(db: Session) -> List[Dict[str, Any]]:
 def lookup_threat_indicator(db: Session, indicator_type: str, value: str) -> Optional[Dict[str, Any]]:
     """
     Perform an indexed lookup using the SHA-256 hash index on ThreatIndicator.indicator_hash
-    for active (non-expired) threat indicators in the local intelligence database.
+    for active generation threat indicators across enabled threat feeds.
     Consolidates multi-source provenance deterministically.
     """
     if not value or not isinstance(value, str):
@@ -620,18 +697,32 @@ def lookup_threat_indicator(db: Session, indicator_type: str, value: str) -> Opt
     now_iso = now_utc.isoformat()
 
     try:
-        # Query matching records by indexed indicator_hash and indicator_type
+        # Retrieve active current_generation_ids for all enabled threat feeds
+        enabled_states = db.query(ThreatFeedState).filter(
+            ThreatFeedState.enabled == True,
+            ThreatFeedState.current_generation_id.isnot(None),
+        ).all()
+        if not enabled_states:
+            return None
+
+        active_gens = {s.source: s.current_generation_id for s in enabled_states}
+        active_gen_ids = list(active_gens.values())
+
+        # Query matching records by indexed indicator_hash, indicator_type, and active generation_id
         records = db.query(ThreatIndicator).filter(
             ThreatIndicator.indicator_type == indicator_type,
             ThreatIndicator.indicator_hash == val_hash,
+            ThreatIndicator.generation_id.in_(active_gen_ids),
         ).all()
 
         if not records:
             return None
 
-        # Filter out expired records using strict UTC parsing
+        # Double check generation matches source's active generation and filter out expired records
         active_records: List[ThreatIndicator] = []
         for r in records:
+            if r.generation_id != active_gens.get(r.source):
+                continue
             if r.expires_at is None:
                 active_records.append(r)
             else:
@@ -701,12 +792,12 @@ async def refresh_threat_feed(
 ) -> Dict[str, Any]:
     """
     Atomic refresh lifecycle:
-    1. Look up or initialize ThreatFeedState
-    2. Fetch / validate with conditional ETag/Last-Modified and bounded memory
-    3. Stage records with new generation_id
-    4. Commit transaction atomically
-    5. Update ThreatFeedState with fresh status and generation
-    6. On failure: roll back staging, preserve existing healthy generation, record error metadata
+    1. Acquire per-source refresh lock to serialize executions for this feed
+    2. Fetch from provider under global concurrency semaphore
+    3. Validate snapshot sanity (record counts, non-empty, valid fields)
+    4. Stage records in isolated generation_id without mutating active generation
+    5. Atomic activation: switch current_generation_id, prune old generation records, commit
+    6. Rollback & Fail-safe: on any error, roll back staging, retain previous healthy generation
     """
     source_name = getattr(provider, "source_name", "unknown")
     limit = max_records or getattr(provider, "fetch_limit", settings.THREAT_FEED_MAX_RECORDS)
@@ -714,80 +805,158 @@ async def refresh_threat_feed(
     now_utc = datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
     start_time = asyncio.get_event_loop().time()
+    allow_empty = getattr(provider, "allow_empty_snapshot", False)
 
-    # Get or create ThreatFeedState
-    state = db.query(ThreatFeedState).filter_by(source=source_name).first()
-    if not state:
-        state = ThreatFeedState(
-            source=source_name,
-            enabled=getattr(provider, "is_enabled", True),
-            status="idle",
-            freshness="never_synced",
-            refresh_interval_seconds=getattr(provider, "default_refresh_interval_seconds", 86400),
-            updated_at=now_iso,
-        )
-        db.add(state)
+    source_lock = await get_source_refresh_lock(source_name)
+    async with source_lock:
+        state = db.query(ThreatFeedState).filter_by(source=source_name).first()
+        if not state:
+            state = ThreatFeedState(
+                source=source_name,
+                enabled=getattr(provider, "is_enabled", True),
+                status="idle",
+                freshness="never_synced",
+                refresh_interval_seconds=getattr(provider, "default_refresh_interval_seconds", 86400),
+                updated_at=now_iso,
+            )
+            db.add(state)
+            db.commit()
+            db.refresh(state)
+
+        state.last_attempt_at = now_iso
+        state.status = "fetching"
         db.commit()
-        db.refresh(state)
 
-    state.last_attempt_at = now_iso
-    state.status = "fetching"
-    db.commit()
+        items: List[NormalizedThreatIndicator] = []
+        not_modified = False
+        new_etag = state.etag
+        new_last_modified = state.last_modified
 
-    # Ingestion step
-    items: List[NormalizedThreatIndicator] = []
-    not_modified = False
-    new_etag = state.etag
-    new_last_modified = state.last_modified
+        if indicators is not None:
+            items = indicators[:limit]
+        else:
+            if not getattr(provider, "is_enabled", True):
+                state.status = "disabled"
+                state.freshness = "disabled"
+                db.commit()
+                return {
+                    "source": source_name,
+                    "status": "disabled",
+                    "records_processed": 0,
+                    "records_inserted": 0,
+                    "records_updated": 0,
+                    "duration_ms": 0,
+                    "generation_id": state.current_generation_id,
+                    "freshness": "disabled",
+                }
 
-    if indicators is not None:
-        items = indicators[:limit]
-    else:
-        try:
-            await asyncio.wait_for(threat_feed_semaphore.acquire(), timeout=2.0)
             try:
-                fetch_coro = provider.fetch_indicators(
-                    limit=limit,
-                    etag=state.etag if getattr(provider, "supports_etag", False) else None,
-                    last_modified=state.last_modified if getattr(provider, "supports_last_modified", False) else None,
-                )
-                fetched_items, new_etag, new_last_modified, not_modified = await asyncio.wait_for(
-                    fetch_coro, timeout=timeout
-                )
-                items = fetched_items[:limit]
-            finally:
-                threat_feed_semaphore.release()
-        except asyncio.TimeoutError:
-            logger.warning("event=threat_feed_timeout source=%s", source_name)
-            state.status = "failed"
-            state.last_error = "timeout"
-            state.freshness = compute_freshness(state.last_success_at, now_iso, "timeout", state.refresh_interval_seconds, state.enabled)
+                async with threat_feed_semaphore:
+                    fetch_coro = provider.fetch_indicators(
+                        limit=limit,
+                        etag=state.etag if getattr(provider, "supports_etag", False) else None,
+                        last_modified=state.last_modified if getattr(provider, "supports_last_modified", False) else None,
+                    )
+                    items, new_etag, new_last_modified, not_modified = await asyncio.wait_for(
+                        fetch_coro, timeout=timeout
+                    )
+            except asyncio.TimeoutError:
+                state.status = "failed"
+                state.last_error = "timeout"
+                state.freshness = compute_freshness(state.last_success_at, now_iso, "timeout", state.refresh_interval_seconds, state.enabled)
+                state.updated_at = now_iso
+                db.commit()
+                duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+                return {
+                    "source": source_name,
+                    "status": "timeout",
+                    "error_code": "timeout",
+                    "records_processed": 0,
+                    "records_inserted": 0,
+                    "records_updated": 0,
+                    "duration_ms": duration_ms,
+                    "generation_id": state.current_generation_id,
+                    "freshness": state.freshness,
+                }
+            except ValueError as ve:
+                err_code = "too_large" if "exceeded" in str(ve).lower() else "invalid_payload"
+                state.status = "failed"
+                state.last_error = err_code
+                state.freshness = compute_freshness(state.last_success_at, now_iso, err_code, state.refresh_interval_seconds, state.enabled)
+                state.updated_at = now_iso
+                db.commit()
+                duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+                return {
+                    "source": source_name,
+                    "status": "failed",
+                    "error_code": err_code,
+                    "records_processed": 0,
+                    "records_inserted": 0,
+                    "records_updated": 0,
+                    "duration_ms": duration_ms,
+                    "generation_id": state.current_generation_id,
+                    "freshness": state.freshness,
+                }
+            except Exception as exc:
+                err_msg = str(exc).lower()
+                if "401" in err_msg or "403" in err_msg or "auth" in err_msg:
+                    err_code = "auth_error"
+                elif "http" in err_msg or "connection" in err_msg or "client" in err_msg:
+                    err_code = "network_error"
+                else:
+                    err_code = "invalid_payload"
+                state.status = "failed"
+                state.last_error = err_code
+                state.freshness = compute_freshness(state.last_success_at, now_iso, err_code, state.refresh_interval_seconds, state.enabled)
+                state.updated_at = now_iso
+                db.commit()
+                duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+                return {
+                    "source": source_name,
+                    "status": "failed",
+                    "error_code": err_code,
+                    "records_processed": 0,
+                    "records_inserted": 0,
+                    "records_updated": 0,
+                    "duration_ms": duration_ms,
+                    "generation_id": state.current_generation_id,
+                    "freshness": state.freshness,
+                }
+
+        if not_modified:
+            state.status = "success"
+            state.last_success_at = now_iso
+            state.last_error = None
+            state.freshness = "fresh"
             state.updated_at = now_iso
             db.commit()
             duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
             return {
                 "source": source_name,
-                "status": "timeout",
+                "status": "not_modified",
                 "records_processed": 0,
                 "records_inserted": 0,
                 "records_updated": 0,
                 "duration_ms": duration_ms,
                 "generation_id": state.current_generation_id,
-                "freshness": state.freshness,
+                "freshness": "fresh",
             }
-        except Exception as e:
-            error_code = "auth_error" if ("401" in str(e) or "403" in str(e)) else ("too_large" if "exceeded" in str(e) else "network_error")
-            logger.error("event=threat_feed_fetch_failed source=%s error=%s", source_name, error_code, exc_info=False)
+
+        # Step 3: Snapshot Sanity Validation
+        state.status = "validating"
+        db.commit()
+
+        if len(items) == 0 and not allow_empty:
             state.status = "failed"
-            state.last_error = error_code
-            state.freshness = compute_freshness(state.last_success_at, now_iso, error_code, state.refresh_interval_seconds, state.enabled)
+            state.last_error = "snapshot_validation_failed_empty"
+            state.freshness = compute_freshness(state.last_success_at, now_iso, "snapshot_validation_failed_empty", state.refresh_interval_seconds, state.enabled)
             state.updated_at = now_iso
             db.commit()
             duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
             return {
                 "source": source_name,
                 "status": "failed",
-                "error_code": error_code,
+                "error_code": "snapshot_validation_failed_empty",
                 "records_processed": 0,
                 "records_inserted": 0,
                 "records_updated": 0,
@@ -796,125 +965,134 @@ async def refresh_threat_feed(
                 "freshness": state.freshness,
             }
 
-    # Step 2: 304 Not Modified handling
-    if not_modified:
-        state.status = "success"
-        state.last_success_at = now_iso
-        state.last_error = None
-        state.freshness = "fresh"
-        state.updated_at = now_iso
+        # Step 4: Staging into new isolated generation
+        state.status = "staging"
         db.commit()
-        duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
-        return {
-            "source": source_name,
-            "status": "not_modified",
-            "records_processed": 0,
-            "records_inserted": 0,
-            "records_updated": 0,
-            "duration_ms": duration_ms,
-            "generation_id": state.current_generation_id,
-            "freshness": "fresh",
-        }
 
-    # Step 3: Staging and Atomic Commit
-    generation_id = str(uuid.uuid4())
-    inserted_count = 0
-    updated_count = 0
+        generation_id = str(uuid.uuid4())
+        valid_records: List[ThreatIndicator] = []
+        seen_in_batch = set()
 
-    try:
         for item in items:
+            if not isinstance(item, NormalizedThreatIndicator):
+                continue
             clean_ind, ind_hash = normalize_indicator_value(item.indicator_type, item.indicator)
             if not clean_ind:
                 continue
 
+            cls = (item.classification or "").lower()
+            if cls not in SEVERITY_HIERARCHY and cls != "suspicious":
+                cls = "phishing"
+
+            conf = max(0.0, min(1.0, float(item.confidence) if item.confidence is not None else 1.0))
+
+            dedup_key = (item.indicator_type, ind_hash)
+            if dedup_key in seen_in_batch:
+                continue
+            seen_in_batch.add(dedup_key)
+
             observed = parse_and_normalize_utc_iso(item.observed_at) or now_iso
             expires = parse_and_normalize_utc_iso(item.expires_at)
 
-            existing = db.query(ThreatIndicator).filter(
-                ThreatIndicator.source == source_name,
-                ThreatIndicator.indicator_type == item.indicator_type,
-                ThreatIndicator.indicator_hash == ind_hash,
-            ).first()
+            rec = ThreatIndicator(
+                id=str(uuid.uuid4()),
+                source=source_name,
+                generation_id=generation_id,
+                indicator_type=item.indicator_type,
+                indicator=clean_ind,
+                indicator_hash=ind_hash,
+                classification=cls,
+                confidence=conf,
+                observed_at=observed,
+                expires_at=expires,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+            valid_records.append(rec)
 
-            if existing:
-                existing.indicator = clean_ind
-                existing.classification = item.classification
-                existing.confidence = item.confidence
-                existing.observed_at = observed
-                existing.expires_at = expires
-                existing.generation_id = generation_id
-                existing.updated_at = now_iso
-                updated_count += 1
-            else:
-                new_record = ThreatIndicator(
-                    id=str(uuid.uuid4()),
-                    source=source_name,
-                    indicator_type=item.indicator_type,
-                    indicator=clean_ind,
-                    indicator_hash=ind_hash,
-                    classification=item.classification,
-                    confidence=item.confidence,
-                    observed_at=observed,
-                    expires_at=expires,
-                    generation_id=generation_id,
-                    created_at=now_iso,
-                    updated_at=now_iso,
-                )
-                db.add(new_record)
-                inserted_count += 1
+        if len(valid_records) == 0 and not allow_empty:
+            state.status = "failed"
+            state.last_error = "snapshot_validation_failed_no_valid_records"
+            state.freshness = compute_freshness(state.last_success_at, now_iso, "snapshot_validation_failed_no_valid_records", state.refresh_interval_seconds, state.enabled)
+            state.updated_at = now_iso
+            db.commit()
+            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            return {
+                "source": source_name,
+                "status": "failed",
+                "error_code": "snapshot_validation_failed_no_valid_records",
+                "records_processed": len(items),
+                "records_inserted": 0,
+                "records_updated": 0,
+                "duration_ms": duration_ms,
+                "generation_id": state.current_generation_id,
+                "freshness": state.freshness,
+            }
 
-        state.status = "success"
-        state.last_success_at = now_iso
-        state.last_success_count = inserted_count + updated_count
-        state.last_error = None
-        state.etag = new_etag
-        state.last_modified = new_last_modified
-        state.current_generation_id = generation_id
-        state.freshness = "fresh"
-        state.updated_at = now_iso
-
+        # Step 5: Atomic Activation & Pruning
+        state.status = "committing"
         db.commit()
 
-        duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
-        logger.info(
-            "event=threat_feed_refresh_success source=%s gen=%s inserted=%d updated=%d",
-            source_name,
-            generation_id,
-            inserted_count,
-            updated_count,
-        )
-        return {
-            "source": source_name,
-            "status": "success",
-            "records_processed": len(items),
-            "records_inserted": inserted_count,
-            "records_updated": updated_count,
-            "duration_ms": duration_ms,
-            "generation_id": generation_id,
-            "freshness": "fresh",
-        }
-    except Exception:
-        db.rollback()
-        state.status = "failed"
-        state.last_error = "db_commit_error"
-        state.freshness = compute_freshness(state.last_success_at, now_iso, "db_commit_error", state.refresh_interval_seconds, state.enabled)
-        state.updated_at = now_iso
         try:
+            if valid_records:
+                db.bulk_save_objects(valid_records)
+
+            state.current_generation_id = generation_id
+            state.status = "success"
+            state.last_success_at = now_iso
+            state.last_success_count = len(valid_records)
+            state.last_error = None
+            state.etag = new_etag
+            state.last_modified = new_last_modified
+            state.freshness = "fresh"
+            state.updated_at = now_iso
+
+            db.query(ThreatIndicator).filter(
+                ThreatIndicator.source == source_name,
+                ThreatIndicator.generation_id != generation_id,
+            ).delete(synchronize_session=False)
+
             db.commit()
+
+            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            logger.info(
+                "event=threat_feed_refresh_success source=%s gen=%s count=%d",
+                source_name,
+                generation_id,
+                len(valid_records),
+            )
+            return {
+                "source": source_name,
+                "status": "success",
+                "records_processed": len(items),
+                "records_inserted": len(valid_records),
+                "records_updated": 0,
+                "duration_ms": duration_ms,
+                "generation_id": generation_id,
+                "freshness": "fresh",
+            }
         except Exception:
-            logger.debug("event=threat_feed_state_rollback_failed", exc_info=False)
-        duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
-        return {
-            "source": source_name,
-            "status": "failed",
-            "error_code": "db_commit_error",
-            "records_processed": 0,
-            "records_inserted": 0,
-            "records_updated": 0,
-            "duration_ms": duration_ms,
-            "generation_id": state.current_generation_id,
-            "freshness": state.freshness,
-        }
+            db.rollback()
+            state.status = "failed"
+            state.last_error = "db_commit_error"
+            state.freshness = compute_freshness(state.last_success_at, now_iso, "db_commit_error", state.refresh_interval_seconds, state.enabled)
+            state.updated_at = now_iso
+            try:
+                db.commit()
+            except Exception:
+                logger.debug("event=threat_feed_state_rollback_failed", exc_info=False)
+            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            return {
+                "source": source_name,
+                "status": "failed",
+                "error_code": "db_commit_error",
+                "records_processed": 0,
+                "records_inserted": 0,
+                "records_updated": 0,
+                "duration_ms": duration_ms,
+                "generation_id": state.current_generation_id,
+                "freshness": state.freshness,
+            }
 
 
 async def refresh_all_threat_feeds(

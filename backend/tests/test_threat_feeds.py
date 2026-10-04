@@ -346,10 +346,20 @@ def test_evidence_fusion_combined_with_webrisk_and_virustotal(client, db_session
     now_iso = datetime.now(timezone.utc).isoformat()
     test_url = "https://critical-fused-malware.com/evil"
     _, h_url = normalize_indicator_value("url", test_url)
+    gen_id = str(uuid.uuid4())
+
+    state = db_session.query(ThreatFeedState).filter_by(source="misp").first()
+    if not state:
+        state = ThreatFeedState(source="misp", enabled=True, status="success", freshness="fresh", current_generation_id=gen_id, updated_at=now_iso)
+        db_session.add(state)
+    else:
+        state.enabled = True
+        state.current_generation_id = gen_id
 
     db_session.add(ThreatIndicator(
         id=str(uuid.uuid4()),
         source="misp",
+        generation_id=gen_id,
         indicator_type="url",
         indicator=test_url,
         indicator_hash=h_url,
@@ -530,6 +540,222 @@ async def test_feed_refresh_atomicity_failed_refresh_preserves_previous_data(db_
     assert lookup_res["is_match"] is True
 
 
+@pytest.mark.asyncio
+async def test_generation_snapshot_removes_absent_indicators_and_lookup_isolation(db_session):
+    """
+    CRITICAL LIFECYCLE INVARIANT (Requirement D1, D5, D6, Part O):
+    Generation 1 produces indicators: A, B, C.
+    All match in lookup.
+    Generation 2 produces indicators: A, B (C is absent/removed).
+    After Gen 2 activation:
+      - A matches
+      - B matches
+      - C DOES NOT MATCH (even with expires_at=None)
+    """
+    source_name = "snapshot_source"
+    url_a = "https://phish-a.example.com/login"
+    url_b = "https://phish-b.example.com/login"
+    url_c = "https://phish-c.example.com/login"
+
+    gen1_items = [
+        NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator=url_a, classification="phishing"),
+        NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator=url_b, classification="phishing"),
+        NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator=url_c, classification="phishing"),
+    ]
+    prov1 = MockFeedProvider(source_name, gen1_items)
+
+    # 1. Refresh Generation 1
+    res1 = await refresh_threat_feed(db_session, prov1, indicators=gen1_items)
+    assert res1["status"] == "success"
+    gen1_id = res1["generation_id"]
+    assert gen1_id is not None
+
+    # Verify all 3 match in active lookup
+    assert lookup_threat_indicator(db_session, "url", url_a)["is_match"] is True
+    assert lookup_threat_indicator(db_session, "url", url_b)["is_match"] is True
+    assert lookup_threat_indicator(db_session, "url", url_c)["is_match"] is True
+
+    # 2. Refresh Generation 2 with only A and B (C removed)
+    gen2_items = [
+        NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator=url_a, classification="phishing"),
+        NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator=url_b, classification="phishing"),
+    ]
+    prov2 = MockFeedProvider(source_name, gen2_items)
+    res2 = await refresh_threat_feed(db_session, prov2, indicators=gen2_items)
+    assert res2["status"] == "success"
+    gen2_id = res2["generation_id"]
+    assert gen2_id != gen1_id
+
+    # 3. PROVE THAT A and B MATCH, AND C DOES NOT MATCH!
+    match_a = lookup_threat_indicator(db_session, "url", url_a)
+    match_b = lookup_threat_indicator(db_session, "url", url_b)
+    match_c = lookup_threat_indicator(db_session, "url", url_c)
+
+    assert match_a is not None and match_a["is_match"] is True
+    assert match_b is not None and match_b["is_match"] is True
+    assert match_c is None, "Removed indicator C must NOT match in the new generation snapshot"
+
+    # State verification
+    state = db_session.query(ThreatFeedState).filter_by(source=source_name).first()
+    assert state.current_generation_id == gen2_id
+    assert state.last_success_count == 2
+
+
+@pytest.mark.asyncio
+async def test_empty_snapshot_rejected_under_default_policy(db_session):
+    """
+    Requirement Part E & 25:
+    Prove that an unexpected empty snapshot fails safely and does NOT wipe a healthy feed.
+    """
+    source_name = "empty_policy_source"
+    url_test = "https://healthy-threat.com/login"
+
+    initial_items = [
+        NormalizedThreatIndicator(source=source_name, indicator_type="url", indicator=url_test, classification="phishing")
+    ]
+    prov = MockFeedProvider(source_name, initial_items)
+    prov.allow_empty_snapshot = False
+
+    # 1. Establish healthy generation 1
+    res1 = await refresh_threat_feed(db_session, prov, indicators=initial_items)
+    assert res1["status"] == "success"
+    gen1_id = res1["generation_id"]
+
+    # 2. Provider returns empty list unexpectedly
+    empty_prov = MockFeedProvider(source_name, [])
+    empty_prov.allow_empty_snapshot = False
+    res2 = await refresh_threat_feed(db_session, empty_prov, indicators=[])
+    assert res2["status"] == "failed"
+    assert "snapshot_validation_failed_empty" in res2["error_code"]
+
+    # 3. Healthy generation 1 remains active and lookup continues to match
+    state = db_session.query(ThreatFeedState).filter_by(source=source_name).first()
+    assert state.current_generation_id == gen1_id
+    assert lookup_threat_indicator(db_session, "url", url_test)["is_match"] is True
+
+
+@pytest.mark.asyncio
+async def test_real_provider_fetch_concurrency_and_per_source_locking(db_session):
+    """
+    Requirement Part G & 10:
+    1. Verify real provider-fetch path exercises threat_feed_semaphore and enforces global concurrency bound.
+    2. Verify same-source refreshes are serialized by per-source locks.
+    """
+    active_global_fetches = 0
+    max_observed_global = 0
+    active_source_stages = {}
+    max_observed_per_source = {}
+    lock = asyncio.Lock()
+
+    class InstrumentedProvider:
+        def __init__(self, name: str):
+            self.source_name = name
+            self.indicator_types = ["url"]
+            self.supports_etag = False
+            self.supports_last_modified = False
+            self.default_refresh_interval_seconds = 86400
+            self.fetch_limit = 100
+            self.is_enabled = True
+            self.allow_empty_snapshot = True
+
+        async def fetch_indicators(self, limit=100, etag=None, last_modified=None):
+            nonlocal active_global_fetches, max_observed_global
+            async with lock:
+                active_global_fetches += 1
+                max_observed_global = max(max_observed_global, active_global_fetches)
+                curr_s = active_source_stages.get(self.source_name, 0) + 1
+                active_source_stages[self.source_name] = curr_s
+                max_observed_per_source[self.source_name] = max(max_observed_per_source.get(self.source_name, 0), curr_s)
+
+            await asyncio.sleep(0.04)
+
+            async with lock:
+                active_global_fetches -= 1
+                active_source_stages[self.source_name] -= 1
+
+            return [
+                NormalizedThreatIndicator(
+                    source=self.source_name,
+                    indicator_type="url",
+                    indicator=f"https://{self.source_name}.org/phish",
+                    classification="phishing"
+                )
+            ], None, None, False
+
+    # A. Test same-source serialization: 4 concurrent tasks refreshing 'source_alpha'
+    alpha_prov = InstrumentedProvider("source_alpha")
+    tasks_same_source = [refresh_threat_feed(db_session, alpha_prov) for _ in range(4)]
+    results_same = await asyncio.gather(*tasks_same_source)
+    assert len(results_same) == 4
+    assert max_observed_per_source["source_alpha"] == 1, "Same source refresh must be strictly serialized (max concurrency == 1)"
+
+    # B. Test multi-source concurrency respecting global semaphore limit
+    providers = [InstrumentedProvider(f"source_diff_{i}") for i in range(5)]
+    tasks_diff = [refresh_threat_feed(db_session, p) for p in providers]
+    results_diff = await asyncio.gather(*tasks_diff)
+    assert len(results_diff) == 5
+    assert max_observed_global <= settings.THREAT_FEED_MAX_CONCURRENT_FETCHES, (
+        f"Observed global fetch concurrency {max_observed_global} exceeded limit {settings.THREAT_FEED_MAX_CONCURRENT_FETCHES}"
+    )
+
+
+def test_schema_migration_path_on_existing_database(tmp_path):
+    """
+    Requirement Part J:
+    Prove that ensure_schema_migrations safely updates an existing sqlite database
+    adding missing generation_id and threat_feed_states table without deleting data.
+    """
+    import sqlite3
+    from app.db import ensure_schema_migrations
+
+    test_db_file = str(tmp_path / "legacy_test.db")
+    conn = sqlite3.connect(test_db_file)
+    cursor = conn.cursor()
+
+    # Create older threat_indicators table without generation_id
+    cursor.execute("""
+        CREATE TABLE threat_indicators (
+            id VARCHAR(36) PRIMARY KEY,
+            source VARCHAR(64) NOT NULL,
+            indicator_type VARCHAR(32) NOT NULL,
+            indicator VARCHAR(2048) NOT NULL,
+            indicator_hash VARCHAR(64) NOT NULL,
+            classification VARCHAR(64) NOT NULL,
+            confidence FLOAT NOT NULL,
+            observed_at VARCHAR(32) NOT NULL,
+            expires_at VARCHAR(32),
+            created_at VARCHAR(32) NOT NULL,
+            updated_at VARCHAR(32) NOT NULL
+        )
+    """)
+    # Insert existing production record
+    cursor.execute("""
+        INSERT INTO threat_indicators (id, source, indicator_type, indicator, indicator_hash, classification, confidence, observed_at, created_at, updated_at)
+        VALUES ('rec-1', 'phishtank', 'url', 'https://legacy-record.com', 'hash123', 'phishing', 1.0, '2026-10-04T00:00:00+00:00', '2026-10-04T00:00:00+00:00', '2026-10-04T00:00:00+00:00')
+    """)
+    conn.commit()
+    conn.close()
+
+    # Run auto-migration
+    ensure_schema_migrations(test_db_file)
+
+    # Verify column was added and existing data was preserved
+    conn2 = sqlite3.connect(test_db_file)
+    cursor2 = conn2.cursor()
+    cursor2.execute("PRAGMA table_info(threat_indicators)")
+    cols = [r[1] for r in cursor2.fetchall()]
+    assert "generation_id" in cols
+
+    cursor2.execute("SELECT indicator FROM threat_indicators WHERE id='rec-1'")
+    row = cursor2.fetchone()
+    assert row is not None and row[0] == "https://legacy-record.com"
+
+    # Verify threat_feed_states table was created
+    cursor2.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='threat_feed_states'")
+    assert cursor2.fetchone() is not None
+    conn2.close()
+
+
 # ================= PART 6: EVIDENCE FUSION & SCORING INVARIANTS =================
 def test_evidence_fusion_and_exact_score_invariants(client, db_session, monkeypatch):
     """
@@ -542,10 +768,24 @@ def test_evidence_fusion_and_exact_score_invariants(client, db_session, monkeypa
     test_url = "https://fused-threat-sample.biz/login"
     _, h_url = normalize_indicator_value("url", test_url)
 
+    gen_pt = str(uuid.uuid4())
+    gen_op = str(uuid.uuid4())
+    gen_misp = str(uuid.uuid4())
+
+    for src, gid in [("phishtank", gen_pt), ("openphish", gen_op), ("misp", gen_misp)]:
+        st = db_session.query(ThreatFeedState).filter_by(source=src).first()
+        if not st:
+            st = ThreatFeedState(source=src, enabled=True, status="success", freshness="fresh", current_generation_id=gid, updated_at=now_iso)
+            db_session.add(st)
+        else:
+            st.enabled = True
+            st.current_generation_id = gid
+
     # Insert 3 sources for same indicator with conflicting classifications
     db_session.add(ThreatIndicator(
         id=str(uuid.uuid4()),
         source="phishtank",
+        generation_id=gen_pt,
         indicator_type="url",
         indicator=test_url,
         indicator_hash=h_url,
@@ -556,6 +796,7 @@ def test_evidence_fusion_and_exact_score_invariants(client, db_session, monkeypa
     db_session.add(ThreatIndicator(
         id=str(uuid.uuid4()),
         source="openphish",
+        generation_id=gen_op,
         indicator_type="url",
         indicator=test_url,
         indicator_hash=h_url,
@@ -566,6 +807,7 @@ def test_evidence_fusion_and_exact_score_invariants(client, db_session, monkeypa
     db_session.add(ThreatIndicator(
         id=str(uuid.uuid4()),
         source="misp",
+        generation_id=gen_misp,
         indicator_type="url",
         indicator=test_url,
         indicator_hash=h_url,

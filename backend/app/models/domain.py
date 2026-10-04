@@ -57,7 +57,7 @@ class ThreatIndicator(Base):
     updated_at = Column(String(32), default=lambda: datetime.now(timezone.utc).isoformat(), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("source", "indicator_type", "indicator_hash", name="uq_source_type_indicator"),
+        UniqueConstraint("source", "generation_id", "indicator_type", "indicator_hash", name="uq_source_gen_type_indicator"),
     )
 
 
