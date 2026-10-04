@@ -144,16 +144,16 @@ def extract_domain_from_email(email_str: str) -> str:
         return match.group(1).lower()
     return ""
 
-def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
+def analyze_email_headers(raw_headers: str, evidence_provenance: str = "untrusted_message") -> Dict[str, Any]:
     """
     Parses email headers and performs standards-aware SPF, DKIM, DMARC, and domain alignment verification.
-    Scoring is strictly trust-aware: untrusted Authentication-Results cannot trigger authoritative failure penalties.
+    Scoring is strictly trust-aware: untrusted claims from raw user-uploaded headers cannot trigger authoritative failure penalties.
     Sanitizes all outputs: raw header blocks and raw PII strings are never retained in details.
     """
     signals = []
     base_risk = 0
 
-    auth = parse_email_authentication(raw_headers)
+    auth = parse_email_authentication(raw_headers, evidence_provenance=evidence_provenance)
 
     dkim_display_status = (
         auth.dkim.status
@@ -225,7 +225,7 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
         })
 
     # 3. Check Authentication Results: Authoritative vs Untrusted Claim Scoring
-    is_trusted_auth = auth.is_authserv_trusted or auth.evidence_source == "received_spf_header"
+    is_trusted_auth = auth.is_authoritative
 
     has_spf_fail = False
     has_dkim_fail = False
@@ -299,8 +299,8 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
                 "description": "Both SPF and DKIM checks failed. The message is completely unauthenticated and likely forged.",
             })
 
-    elif auth.evidence_source == "untrusted_auth_results":
-        # Untrusted claims: surface diagnostic metadata without applying authoritative failure penalties
+    else:
+        # Untrusted claims (user-uploaded headers): surface diagnostic metadata without authoritative penalties
         untrusted_claims = []
         if auth.spf.status in ("fail", "softfail"):
             untrusted_claims.append(f"SPF: {auth.spf.status}")
@@ -315,7 +315,7 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
                 "id": "untrusted_auth_claim",
                 "severity": "low",
                 "title": "Untrusted Authentication Header Claim",
-                "description": f"The message header contains an unverified Authentication-Results claim ({', '.join(untrusted_claims)}) from untrusted authserv '{auth.authserv_id or 'unknown'}'. This is evaluated as diagnostic claim metadata, not verified receiver evidence.",
+                "description": f"The message header contains an unverified authentication claim ({', '.join(untrusted_claims)}) from '{auth.authserv_id or auth.evidence_source}'. This is evaluated as diagnostic claim metadata, not verified receiver evidence.",
             })
 
     risk_score = min(base_risk, 100)

@@ -71,8 +71,11 @@ class NormalizedEmailAuth:
     dmarc: DmarcAuthResult = field(default_factory=DmarcAuthResult)
     alignment: AuthAlignmentResult = field(default_factory=AuthAlignmentResult)
     authserv_id: Optional[str] = None
-    is_authserv_trusted: bool = False
-    authserv_trusted: bool = False
+    authserv_id_matched: bool = False
+    is_authserv_trusted: bool = False  # True ONLY if evidence is authoritative (trusted provenance + matched authserv)
+    authserv_trusted: bool = False     # Alias for backward compatibility
+    is_authoritative: bool = False      # Explicit flag: True if trusted_ingress/direct_server_verification
+    evidence_provenance: str = "untrusted_message"  # "untrusted_message", "trusted_ingress", "direct_server_verification", "none"
     authentication_results_present: bool = False
     evidence_source: str = "none"  # "trusted_auth_results", "untrusted_auth_results", "received_spf_header", "dkim_signature_present", "none"
     auth_headers_present: bool = False
@@ -331,13 +334,22 @@ def parse_authentication_results(auth_results_str: str) -> Tuple[SpfAuthResult, 
 def parse_email_authentication(
     raw_headers: str,
     trusted_authserv_ids: Optional[Set[str]] = None,
+    evidence_provenance: str = "untrusted_message",
 ) -> NormalizedEmailAuth:
     """
     Main entry point: parses raw email headers and returns a fully normalized,
     standards-aware authentication representation with strict domain alignment,
-    trusted authserv evaluation, multiple DKIM signature tracking, and zero raw header leaks.
+    explicit provenance boundaries, trusted authserv evaluation, multiple DKIM signature tracking,
+    and zero raw header leaks.
+
+    Provenance Rules:
+    - 'untrusted_message': Message claims supplied in user/raw email. Even if authserv-id
+      matches TRUSTED_AUTHSERV_IDS, is_authoritative remains False.
+    - 'trusted_ingress': Header supplied by a cryptographically verified server-side MTA gateway.
+      If authserv-id matches TRUSTED_AUTHSERV_IDS, is_authoritative is True.
+    - 'direct_server_verification': Directly performed cryptographic verification by the application.
     """
-    result = NormalizedEmailAuth()
+    result = NormalizedEmailAuth(evidence_provenance=evidence_provenance)
     if not raw_headers or not isinstance(raw_headers, str):
         return result
 
@@ -378,7 +390,7 @@ def parse_email_authentication(
             chosen_spf = SpfAuthResult()
             chosen_dkim = DkimAuthResult()
             chosen_dmarc = DmarcAuthResult()
-            found_trusted = False
+            authserv_matched = False
 
             # First pass: check for any trusted authserv ID match
             for ar_val in auth_results_list:
@@ -386,11 +398,11 @@ def parse_email_authentication(
                 if authserv_id and trusted_ids and authserv_id.lower() in trusted_ids:
                     chosen_authserv_id = authserv_id
                     chosen_spf, chosen_dkim, chosen_dmarc = spf_ar, dkim_ar, dmarc_ar
-                    found_trusted = True
+                    authserv_matched = True
                     break
 
             # Second pass: if no trusted match, take the top/first valid header as untrusted claim
-            if not found_trusted and auth_results_list:
+            if not authserv_matched and auth_results_list:
                 for ar_val in auth_results_list:
                     authserv_id, spf_ar, dkim_ar, dmarc_ar = parse_single_authentication_results(ar_val)
                     if authserv_id or spf_ar.status != "unknown" or dkim_ar.status != "unknown" or dmarc_ar.status != "unknown":
@@ -399,9 +411,17 @@ def parse_email_authentication(
                         break
 
             result.authserv_id = chosen_authserv_id
-            result.is_authserv_trusted = found_trusted
-            result.authserv_trusted = found_trusted
-            result.evidence_source = "trusted_auth_results" if found_trusted else "untrusted_auth_results"
+            result.authserv_id_matched = authserv_matched
+
+            # Authoritative if provenance is trusted ingress AND authserv matched, or direct verification
+            is_authoritative = (
+                (evidence_provenance == "trusted_ingress" and authserv_matched)
+                or (evidence_provenance == "direct_server_verification")
+            )
+            result.is_authoritative = is_authoritative
+            result.is_authserv_trusted = is_authoritative
+            result.authserv_trusted = is_authoritative
+            result.evidence_source = "trusted_auth_results" if is_authoritative else "untrusted_auth_results"
 
             if chosen_spf.status != "unknown":
                 result.spf = chosen_spf

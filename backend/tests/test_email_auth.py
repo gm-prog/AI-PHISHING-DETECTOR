@@ -246,52 +246,68 @@ def test_spf_mailfrom_vs_return_path_and_helo():
 def test_authserv_id_trust_boundary_and_multiple_headers():
     """
     Verify trust boundary:
-    1. Untrusted authserv-id sets is_authserv_trusted=False and evidence_source='untrusted_auth_results'.
-    2. Multiple headers select the trusted authserv-id when configured.
+    1. Untrusted authserv-id sets authserv_id_matched=False and is_authserv_trusted=False.
+    2. In raw untrusted mode, even matching authserv-id remains unauthoritative (is_authoritative=False).
+    3. In trusted_ingress mode, matching authserv-id establishes authoritative trust (is_authoritative=True).
     """
     trusted_set = {"mx.google.com", "protection.outlook.com"}
 
-    # Case 1: Untrusted authserv ID claiming trusted pass
+    # Case 1: Untrusted authserv ID
     headers_untrusted = (
         "From: User <user@example.com>\n"
         "Authentication-Results: untrusted-internal-hop.local; dkim=pass header.d=example.com; spf=pass\n"
     )
-    auth1 = parse_email_authentication(headers_untrusted, trusted_authserv_ids=trusted_set)
+    auth1 = parse_email_authentication(headers_untrusted, trusted_authserv_ids=trusted_set, evidence_provenance="trusted_ingress")
     assert auth1.authserv_id == "untrusted-internal-hop.local"
+    assert auth1.authserv_id_matched is False
     assert auth1.is_authserv_trusted is False
+    assert auth1.is_authoritative is False
     assert auth1.evidence_source == "untrusted_auth_results"
     assert auth1.auth_headers_present is True
 
-    # Case 2: Multiple headers where top hop is untrusted but gateway is trusted
+    # Case 2: In untrusted message mode, matching authserv-id is recognized but remains unauthoritative
     headers_multiple = (
         "From: User <user@example.com>\n"
         "Authentication-Results: untrusted-relay.net; dkim=pass header.d=attacker.com\n"
         "Authentication-Results: mx.google.com; dkim=pass header.d=example.com; spf=pass smtp.mailfrom=user@example.com; dmarc=pass\n"
     )
-    auth2 = parse_email_authentication(headers_multiple, trusted_authserv_ids=trusted_set)
-    assert auth2.authserv_id == "mx.google.com"
-    assert auth2.is_authserv_trusted is True
-    assert auth2.evidence_source == "trusted_auth_results"
-    assert auth2.dkim.domain == "example.com"
-    assert auth2.alignment.dkim_aligned is True
+    auth2_raw = parse_email_authentication(headers_multiple, trusted_authserv_ids=trusted_set, evidence_provenance="untrusted_message")
+    assert auth2_raw.authserv_id == "mx.google.com"
+    assert auth2_raw.authserv_id_matched is True
+    assert auth2_raw.is_authoritative is False
+    assert auth2_raw.is_authserv_trusted is False
+
+    # Case 3: In trusted ingress mode, matching authserv-id establishes authoritative trust
+    auth2_trusted = parse_email_authentication(headers_multiple, trusted_authserv_ids=trusted_set, evidence_provenance="trusted_ingress")
+    assert auth2_trusted.authserv_id == "mx.google.com"
+    assert auth2_trusted.authserv_id_matched is True
+    assert auth2_trusted.is_authoritative is True
+    assert auth2_trusted.is_authserv_trusted is True
+    assert auth2_trusted.evidence_source == "trusted_auth_results"
+    assert auth2_trusted.dkim.domain == "example.com"
+    assert auth2_trusted.alignment.dkim_aligned is True
 
 
-def test_untrusted_auth_results_cannot_trigger_authoritative_scoring():
+def test_attacker_crafted_trusted_authserv_in_raw_headers_remains_untrusted(monkeypatch):
     """
-    Requirement A4 & A11: Prove that untrusted authentication claims (e.g. attacker-crafted
-    Authentication-Results: evil.corp; spf=fail; dkim=fail; dmarc=fail) CANNOT trigger the
-    authoritative high-severity failure penalties (+95 compound score) that trusted gateway results trigger.
+    CRITICAL SECURITY INVARIANT:
+    Prove that an attacker submitting fake failure claims in user-uploaded raw headers
+    using a recognized authserv-id (e.g. mx.google.com) CANNOT manufacture trusted provenance
+    or trigger authoritative penalties (+95 compound score).
     """
-    # Attacker crafts headers with fake failure claims under untrusted authserv
+    monkeypatch.setattr("app.config.settings.TRUSTED_AUTHSERV_IDS", "mx.google.com")
+
     attacker_headers = (
-        "From: Alice <alice@example.com>\n"
-        "Return-Path: <alice@example.com>\n"
-        "Authentication-Results: attacker-relay.bad; spf=fail; dkim=fail; dmarc=fail\n"
+        "From: CEO <ceo@example.com>\n"
+        "Return-Path: <ceo@example.com>\n"
+        "Authentication-Results: mx.google.com; spf=fail; dkim=fail; dmarc=fail\n"
+        "Received-SPF: fail (google.com: domain of ceo@example.com does not designate 1.2.3.4) envelope-from=ceo@example.com;\n"
     )
 
-    res_untrusted = analyze_email_headers(attacker_headers)
+    # In raw upload mode (default evidence_provenance="untrusted_message")
+    res_untrusted = analyze_email_headers(attacker_headers, evidence_provenance="untrusted_message")
 
-    # Score must be low (e.g. <= 10), NOT the critical 95+ from verified receiver failures
+    # Risk score must remain low (<= 10), NOT the critical 95+ from verified receiver failures
     assert res_untrusted["risk_score"] <= 10
     signal_ids = [s["id"] for s in res_untrusted["signals"]]
     assert "spf_fail" not in signal_ids
@@ -302,16 +318,20 @@ def test_untrusted_auth_results_cannot_trigger_authoritative_scoring():
     assert "untrusted_auth_claim" in signal_ids
 
 
-def test_trusted_auth_results_triggers_authoritative_scoring(monkeypatch):
-    """Prove that trusted gateway failures correctly trigger authoritative penalties."""
+def test_trusted_ingress_provenance_enables_authoritative_scoring(monkeypatch):
+    """
+    Prove that when server-controlled trusted ingress provenance is explicitly established,
+    matching TRUSTED_AUTHSERV_IDS authorizes authoritative SPF/DKIM/DMARC failure scoring.
+    """
     monkeypatch.setattr("app.config.settings.TRUSTED_AUTHSERV_IDS", "mx.google.com")
 
     trusted_headers = (
-        "From: Alice <alice@example.com>\n"
+        "From: CEO <ceo@example.com>\n"
         "Return-Path: <attacker@evil.com>\n"
         "Authentication-Results: mx.google.com; spf=fail; dkim=fail; dmarc=fail\n"
     )
-    res_trusted = analyze_email_headers(trusted_headers)
+    # Server-side MTA / trusted gateway establishes trusted ingress provenance
+    res_trusted = analyze_email_headers(trusted_headers, evidence_provenance="trusted_ingress")
 
     assert res_trusted["risk_score"] >= 95
     signal_ids = [s["id"] for s in res_trusted["signals"]]
@@ -319,6 +339,53 @@ def test_trusted_auth_results_triggers_authoritative_scoring(monkeypatch):
     assert "dkim_fail" in signal_ids
     assert "dmarc_fail" in signal_ids
     assert "sender_domain_mismatch" in signal_ids
+
+
+def test_received_spf_in_raw_message_cannot_trigger_authoritative_scoring():
+    """
+    Prove that Received-SPF header inside user-supplied raw message does NOT
+    grant trusted authority or trigger authoritative penalties.
+    """
+    raw_headers = (
+        "From: Alice <alice@example.com>\n"
+        "Return-Path: <alice@example.com>\n"
+        "Received-SPF: fail (domain of alice@example.com does not designate 5.6.7.8) envelope-from=alice@example.com;\n"
+    )
+    res = analyze_email_headers(raw_headers, evidence_provenance="untrusted_message")
+    assert res["risk_score"] <= 10
+    signal_ids = [s["id"] for s in res["signals"]]
+    assert "spf_fail" not in signal_ids
+    assert "compound_sender_spoof_and_spf_fail" not in signal_ids
+
+
+def test_dkim_i_cannot_become_d_and_missing_d_produces_unknown_signing_domain():
+    """Prove d= is never derived from i= and missing d= means unknown signing domain."""
+    ar_header = "Authentication-Results: mx.test.com; dkim=pass header.i=user@spoofed-brand.com"
+    _, _, dkim, _ = parse_single_authentication_results(ar_header)
+    assert dkim.identity == "user@spoofed-brand.com"
+    assert dkim.domain is None
+
+    auth = parse_email_authentication(
+        "From: User <user@spoofed-brand.com>\n" + ar_header,
+        evidence_provenance="trusted_ingress",
+        trusted_authserv_ids={"mx.test.com"}
+    )
+    assert auth.alignment.dkim_domain is None
+    assert auth.alignment.dkim_aligned is False
+
+
+def test_helo_and_return_path_cannot_satisfy_spf_dmarc_alignment():
+    """Prove HELO and Return-Path cannot substitute for authenticated SPF MAIL FROM."""
+    # From is paypal.com, Return-Path is paypal.com, but SPF mailfrom is evil.com and HELO is paypal.com
+    headers = (
+        "From: PayPal <support@paypal.com>\n"
+        "Return-Path: <bounce@paypal.com>\n"
+        "Authentication-Results: mx.test.com; spf=pass smtp.mailfrom=attacker@evil.com smtp.helo=mail.paypal.com"
+    )
+    auth = parse_email_authentication(headers, evidence_provenance="trusted_ingress", trusted_authserv_ids={"mx.test.com"})
+    assert auth.alignment.spf_mailfrom_domain == "evil.com"
+    assert auth.alignment.spf_aligned is False
+    assert auth.alignment.dmarc_aligned is False
 
 
 def test_email_alignment_same_and_subdomain():
