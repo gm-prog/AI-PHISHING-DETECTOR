@@ -50,12 +50,13 @@ class Settings:
 
     # Threat Intelligence Feed Ingestion Settings
     PHISHTANK_API_KEY: str = os.getenv("PHISHTANK_API_KEY", "")
-    PHISHTANK_FEED_URL: str = os.getenv("PHISHTANK_FEED_URL", "https://data.phishtank.com/data/online-valid.json")
+    PHISHTANK_FEED_URL: str = os.getenv("PHISHTANK_FEED_URL", "http://data.phishtank.com/data/online-valid.json.bz2")
     OPENPHISH_FEED_URL: str = os.getenv("OPENPHISH_FEED_URL", "https://openphish.com/feed.txt")
     MISP_SERVER_URL: str = os.getenv("MISP_SERVER_URL", "")
     MISP_API_KEY: str = os.getenv("MISP_API_KEY", "")
     THREAT_FEED_MAX_RECORDS: int = int(os.getenv("THREAT_FEED_MAX_RECORDS", "10000"))
     THREAT_FEED_MAX_RESPONSE_BYTES: int = int(os.getenv("THREAT_FEED_MAX_RESPONSE_BYTES", "33554432"))  # 32MB max
+    THREAT_FEED_MAX_DECOMPRESSED_BYTES: int = int(os.getenv("THREAT_FEED_MAX_DECOMPRESSED_BYTES", "67108864"))  # 64MB max decompressed
     THREAT_FEED_TIMEOUT_SECONDS: float = float(os.getenv("THREAT_FEED_TIMEOUT_SECONDS", "10.0"))
     THREAT_FEED_MAX_CONCURRENT_FETCHES: int = int(os.getenv("THREAT_FEED_MAX_CONCURRENT_FETCHES", "2"))
 

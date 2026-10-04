@@ -66,17 +66,18 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 ```bash
 ============================= test session starts ==============================
 platform linux -- Python 3.11.2, pytest-9.1.1, pluggy-1.6.0
-rootdir: /home/user/AI-PHISHING-DETECTOR
+rootdir: /home/user/AI-PHISHING-DETECTOR/backend
 plugins: platformdirs-4.12.3, anyio-4.15.1, asyncio-1.4.0
-collected 100 items
+collected 107 items
 
-backend/tests/test_email_auth.py ......................                  [ 22%]
-backend/tests/test_security_hardening.py ............................... [ 53%]
-..............                                                           [ 67%]
-backend/tests/test_threat_feeds.py .................                     [ 84%]
-backend/tests/test_webrisk.py ................                           [100%]
+test_backend.py ..                                                       [  1%]
+tests/test_email_auth.py ......................                          [ 22%]
+tests/test_security_hardening.py ....................................... [ 58%]
+......                                                                   [ 64%]
+tests/test_threat_feeds.py ......................                        [ 85%]
+tests/test_webrisk.py ................                                   [100%]
 
-======================= 100 passed, 3 warnings in 14.17s =======================
+======================= 107 passed, 3 warnings in 14.67s =======================
 ```
 
 ---

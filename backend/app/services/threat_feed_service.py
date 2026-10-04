@@ -5,6 +5,7 @@ Lifecycle, Freshness, and Evidence Fusion Layer.
 """
 
 import asyncio
+import bz2
 import hashlib
 import json
 import logging
@@ -145,6 +146,63 @@ async def bounded_fetch_stream(
         return status, b"".join(chunks), resp_headers
 
 
+def decompress_bz2_bounded(
+    compressed_bytes: bytes,
+    max_decompressed_bytes: int = 67108864,
+) -> bytes:
+    """
+    Decompresses a BZ2 stream in bounded chunks to protect against decompression bombs.
+    Raises ValueError on invalid stream or if decompressed size exceeds max_decompressed_bytes.
+    """
+    decompressor = bz2.BZ2Decompressor()
+    decompressed_chunks = []
+    total_decompressed = 0
+    chunk_size = 65536
+
+    try:
+        offset = 0
+        input_len = len(compressed_bytes)
+        while offset < input_len:
+            in_slice = compressed_bytes[offset:offset + chunk_size]
+            offset += len(in_slice)
+            out_chunk = decompressor.decompress(in_slice)
+            if out_chunk:
+                total_decompressed += len(out_chunk)
+                if total_decompressed > max_decompressed_bytes:
+                    raise ValueError(
+                        f"Decompressed feed size exceeded maximum limit of {max_decompressed_bytes} bytes"
+                    )
+                decompressed_chunks.append(out_chunk)
+    except ValueError:
+        raise
+    except (OSError, EOFError) as e:
+        raise ValueError("Invalid BZ2 stream") from e
+
+    return b"".join(decompressed_chunks)
+
+
+def build_phishtank_url(base_url: str, api_key: Optional[str]) -> str:
+    """
+    Constructs the documented PhishTank downloadable feed URL.
+    - If API key is present: http(s)://data.phishtank.com/data/<app_key>/online-valid.json.bz2 (or .json)
+    - If no API key: http(s)://data.phishtank.com/data/online-valid.json.bz2 (or .json)
+    """
+    clean_url = (base_url or "").strip()
+    if not api_key or not api_key.strip():
+        return clean_url
+    clean_key = api_key.strip()
+
+    if "/data/online-valid." in clean_url:
+        return clean_url.replace("/data/online-valid.", f"/data/{clean_key}/online-valid.")
+    elif "<key>" in clean_url:
+        return clean_url.replace("<key>", clean_key)
+    elif "{app_key}" in clean_url:
+        return clean_url.replace("{app_key}", clean_key)
+    elif clean_url.endswith("/data") or clean_url.endswith("/data/"):
+        return f"{clean_url.rstrip('/')}/{clean_key}/online-valid.json.bz2"
+    return clean_url
+
+
 class PhishTankFeedProvider:
     """Production provider for PhishTank verified/online phishing URL feed."""
     source_name = "phishtank"
@@ -168,28 +226,20 @@ class PhishTankFeedProvider:
     ) -> Tuple[List[NormalizedThreatIndicator], Optional[str], Optional[str], bool]:
         headers = {
             "User-Agent": "phishtank/sentinel-ai (PhishingDetector; security@sentinel.local)",
-            "Accept": "application/json",
+            "Accept": "application/json, application/x-bzip2, */*",
         }
         if etag:
             headers["If-None-Match"] = etag
         if last_modified:
             headers["If-Modified-Since"] = last_modified
 
-        target_url = self.feed_url
-        params = {}
-        if self.api_key and self.api_key.strip():
-            clean_key = self.api_key.strip()
-            if target_url == "http://data.phishtank.com/data/online-valid.json":
-                target_url = f"http://data.phishtank.com/data/{clean_key}/online-valid.json"
-            else:
-                params["app_key"] = clean_key
+        target_url = build_phishtank_url(self.feed_url, self.api_key)
 
         async with aiohttp.ClientSession() as session:
             status, body, resp_headers = await bounded_fetch_stream(
                 session,
                 target_url,
                 headers=headers,
-                params=params if params else None,
                 max_bytes=settings.THREAT_FEED_MAX_RESPONSE_BYTES,
                 timeout_seconds=settings.THREAT_FEED_TIMEOUT_SECONDS,
             )
@@ -203,7 +253,21 @@ class PhishTankFeedProvider:
             new_etag = resp_headers.get("etag")
             new_last_modified = resp_headers.get("last-modified")
 
-            raw_data = json.loads(body.decode("utf-8", errors="replace"))
+            # Check if payload is BZ2 compressed
+            is_bz2 = body.startswith(b"BZh") or target_url.endswith(".bz2") or "bzip2" in resp_headers.get("content-type", "")
+            if is_bz2:
+                decompressed_bytes = decompress_bz2_bounded(
+                    body,
+                    max_decompressed_bytes=settings.THREAT_FEED_MAX_DECOMPRESSED_BYTES,
+                )
+            else:
+                decompressed_bytes = body
+
+            try:
+                raw_data = json.loads(decompressed_bytes.decode("utf-8", errors="replace"))
+            except Exception as exc:
+                raise ValueError("Malformed JSON after decompression") from exc
+
             if not isinstance(raw_data, list):
                 raise ValueError("Unexpected PhishTank feed structure; expected list of phish records")
 
@@ -879,7 +943,15 @@ async def refresh_threat_feed(
                     "freshness": state.freshness,
                 }
             except ValueError as ve:
-                err_code = "too_large" if "exceeded" in str(ve).lower() else "invalid_payload"
+                err_str = str(ve).lower()
+                if "decompressed" in err_str:
+                    err_code = "decompression_too_large"
+                elif "bz2" in err_str:
+                    err_code = "decompression_invalid"
+                elif "exceeded" in err_str:
+                    err_code = "too_large"
+                else:
+                    err_code = "invalid_payload"
                 state.status = "failed"
                 state.last_error = err_code
                 state.freshness = compute_freshness(state.last_success_at, now_iso, err_code, state.refresh_interval_seconds, state.enabled)
