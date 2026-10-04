@@ -147,6 +147,7 @@ def extract_domain_from_email(email_str: str) -> str:
 def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
     """
     Parses email headers and performs standards-aware SPF, DKIM, DMARC, and domain alignment verification.
+    Sanitizes all outputs: raw header blocks and raw PII strings are never retained in details.
     """
     signals = []
     base_risk = 0
@@ -159,24 +160,52 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
         else ("signed" if auth.dkim.is_signed else "none")
     )
 
+    # 1. Subject line urgency evaluation (privacy-preserving: detect flag without persisting raw text)
+    urgent_flags: List[str] = []
+    try:
+        parser = HeaderParser()
+        parsed = parser.parsestr(raw_headers)
+        raw_subject = parsed.get("Subject", "")
+        if raw_subject:
+            subject_lower = raw_subject.lower()
+            urgent_words = ["urgent", "action required", "suspended", "notice", "alert", "security update"]
+            for word in urgent_words:
+                if word in subject_lower:
+                    urgent_flags.append(word)
+                    base_risk += 15
+                    signals.append({
+                        "id": f"subject_urgent_{word.replace(' ', '_')}",
+                        "severity": "medium",
+                        "title": f"Urgent Topic in Subject ({word.capitalize()})",
+                        "description": f"The email subject line uses the trigger word '{word}' to induce stress and fast clicking.",
+                    })
+                    break
+    except Exception:
+        pass
+
     details = {
-        "from": auth.from_header,
-        "return_path": auth.return_path_header,
-        "subject": auth.subject,
-        "spf_status": auth.spf.status,
-        "dkim_status": dkim_display_status,
-        "dmarc_status": auth.dmarc.status,
-        "sender_mismatch": auth.alignment.sender_mismatch,
         "from_domain": auth.alignment.from_domain,
         "from_registered_domain": auth.alignment.from_registered_domain,
         "return_path_domain": auth.alignment.return_path_domain,
         "return_path_registered_domain": auth.alignment.return_path_registered_domain,
+        "spf_mailfrom_domain": auth.alignment.spf_mailfrom_domain,
+        "spf_helo_domain": auth.alignment.spf_helo_domain,
+        "spf_status": auth.spf.status,
+        "dkim_status": dkim_display_status,
+        "dkim_domain": auth.alignment.dkim_domain,
+        "dkim_selector": auth.dkim.selector,
+        "dmarc_status": auth.dmarc.status,
         "spf_aligned": auth.alignment.spf_aligned,
         "dkim_aligned": auth.alignment.dkim_aligned,
         "dmarc_aligned": auth.alignment.dmarc_aligned,
+        "sender_mismatch": auth.alignment.sender_mismatch,
+        "authserv_id": auth.authserv_id,
+        "is_authserv_trusted": auth.is_authserv_trusted,
+        "auth_headers_present": auth.auth_headers_present,
+        "subject_urgent_flags": urgent_flags,
     }
 
-    # 1. Sender Spoofing Check (From vs Return-Path registered domain mismatch)
+    # 2. Sender Spoofing Check (From vs Return-Path registered domain mismatch)
     has_sender_mismatch = auth.alignment.sender_mismatch
     if has_sender_mismatch:
         from_d = auth.alignment.from_registered_domain or "unknown"
@@ -189,7 +218,7 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
             "description": f"The visual sender domain ({from_d}) does not match the delivery address domain ({rp_d}). This is a strong indicator of header spoofing.",
         })
 
-    # 2. Check SPF status
+    # 3. Check SPF status
     has_spf_fail = auth.spf.status == "fail"
     if has_spf_fail:
         base_risk += 35
@@ -216,7 +245,7 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
             "description": f"The SPF record evaluation resulted in a {auth.spf.status}.",
         })
 
-    # 3. Check DKIM Status (Note: missing/none is NOT scored as a failure)
+    # 4. Check DKIM Status (Note: missing/none is NOT scored as a failure)
     has_dkim_fail = auth.dkim.status == "fail"
     if has_dkim_fail:
         base_risk += 25
@@ -227,7 +256,7 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
             "description": "The DKIM digital signature is invalid, meaning the email body or headers were modified in transit or signed with an invalid key.",
         })
 
-    # 4. Check DMARC Status
+    # 5. Check DMARC Status
     has_dmarc_fail = auth.dmarc.status == "fail"
     if has_dmarc_fail:
         base_risk += 25
@@ -237,21 +266,6 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
             "title": "DMARC Policy Failure",
             "description": "The message failed DMARC authentication and alignment policy checks.",
         })
-
-    # 5. Urgency in Subject - Weight: 15
-    if auth.subject:
-        subject_lower = auth.subject.lower()
-        urgent_words = ["urgent", "action required", "suspended", "notice", "alert", "security update"]
-        for word in urgent_words:
-            if word in subject_lower:
-                base_risk += 15
-                signals.append({
-                    "id": f"subject_urgent_{word.replace(' ', '_')}",
-                    "severity": "medium",
-                    "title": f"Urgent Topic in Subject ({word.capitalize()})",
-                    "description": f"The email subject line uses the trigger word '{word}' to induce stress and fast clicking.",
-                })
-                break
 
     # Compounding Boost Rules for Headers
     # Rule A: Sender Domain Mismatch + SPF Fail = Critical Threat

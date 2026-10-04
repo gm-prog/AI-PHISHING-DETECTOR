@@ -1,15 +1,17 @@
 """
 File: backend/app/services/email_auth_service.py
 Purpose: Standards-aware parsing and normalization of email authentication headers
-(RFC 8601 Authentication-Results, RFC 7208 SPF, RFC 6376 DKIM, RFC 7489 DMARC).
+(RFC 8601 / RFC 7601 Authentication-Results, RFC 7208 SPF, RFC 6376 DKIM, RFC 7489 DMARC).
 """
 
 import re
 import logging
 from dataclasses import dataclass, field, asdict
 from email.parser import HeaderParser
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List, Set
 import tldextract
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -22,16 +24,17 @@ VALID_DMARC_STATUSES = {"pass", "fail", "none", "temperror", "permerror", "unkno
 @dataclass
 class SpfAuthResult:
     status: str = "unknown"
-    domain: Optional[str] = None
-    scope: Optional[str] = None
+    mailfrom_domain: Optional[str] = None
+    helo_domain: Optional[str] = None
     client_ip: Optional[str] = None
 
 
 @dataclass
 class DkimAuthResult:
     status: str = "unknown"
-    domain: Optional[str] = None
-    selector: Optional[str] = None
+    domain: Optional[str] = None       # d= signing domain used for alignment
+    identity: Optional[str] = None     # i= AUID / agent identity
+    selector: Optional[str] = None     # s= selector
     is_signed: bool = False
 
 
@@ -49,6 +52,9 @@ class AuthAlignmentResult:
     from_registered_domain: Optional[str] = None
     return_path_domain: Optional[str] = None
     return_path_registered_domain: Optional[str] = None
+    spf_mailfrom_domain: Optional[str] = None
+    spf_mailfrom_registered_domain: Optional[str] = None
+    spf_helo_domain: Optional[str] = None
     dkim_domain: Optional[str] = None
     dkim_registered_domain: Optional[str] = None
     spf_aligned: bool = False
@@ -63,10 +69,11 @@ class NormalizedEmailAuth:
     dkim: DkimAuthResult = field(default_factory=DkimAuthResult)
     dmarc: DmarcAuthResult = field(default_factory=DmarcAuthResult)
     alignment: AuthAlignmentResult = field(default_factory=AuthAlignmentResult)
-    from_header: str = ""
-    return_path_header: str = ""
-    subject: str = ""
+    authserv_id: Optional[str] = None
+    is_authserv_trusted: bool = False
+    auth_headers_present: bool = False
     is_malformed: bool = False
+    subject_urgent_flags: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -108,12 +115,90 @@ def extract_domain(email_or_domain: str) -> Tuple[Optional[str], Optional[str]]:
     return clean.lower(), reg_domain
 
 
+def strip_comments(header_val: str) -> str:
+    """Strip RFC 5322 parenthesized comments (e.g. '(comment)') not inside double quotes."""
+    out = []
+    in_quote = False
+    depth = 0
+    escape = False
+    for ch in header_val:
+        if escape:
+            if not in_quote and depth > 0:
+                pass
+            else:
+                out.append(ch)
+            escape = False
+            continue
+        if ch == '\\':
+            escape = True
+            if not in_quote and depth > 0:
+                pass
+            else:
+                out.append(ch)
+            continue
+        if ch == '"' and depth == 0:
+            in_quote = not in_quote
+            out.append(ch)
+            continue
+        if not in_quote:
+            if ch == '(':
+                depth += 1
+                continue
+            elif ch == ')':
+                if depth > 0:
+                    depth -= 1
+                continue
+        if depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+def split_outside_quotes(text: str, delimiter: str = ';') -> List[str]:
+    """Split text by delimiter, ignoring delimiters that appear inside double quotes."""
+    parts = []
+    current = []
+    in_quote = False
+    escape = False
+    for ch in text:
+        if escape:
+            current.append(ch)
+            escape = False
+            continue
+        if ch == '\\':
+            escape = True
+            current.append(ch)
+            continue
+        if ch == '"':
+            in_quote = not in_quote
+            current.append(ch)
+            continue
+        if ch == delimiter and not in_quote:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return [p for p in parts if p]
+
+
+def parse_segment_tokens(segment: str) -> Dict[str, str]:
+    """Parse key=val or prop=val tokens in a segment, respecting double quotes."""
+    tokens = {}
+    pattern = r'([a-zA-Z0-9_\.-]+)=(?:"([^"]*)"|([^\s;]+))'
+    for match in re.finditer(pattern, segment):
+        k = match.group(1).lower()
+        v = match.group(2) if match.group(2) is not None else match.group(3)
+        tokens[k] = v
+    return tokens
+
+
 def parse_received_spf(spf_str: str) -> SpfAuthResult:
     """Parse RFC 7208 Received-SPF header."""
     if not spf_str or not isinstance(spf_str, str):
         return SpfAuthResult(status="unknown")
 
-    clean = spf_str.strip()
+    clean = strip_comments(spf_str.strip())
     # First word is typically the result
     match = re.match(r'^([a-zA-Z]+)', clean)
     if not match:
@@ -122,174 +207,269 @@ def parse_received_spf(spf_str: str) -> SpfAuthResult:
     raw_status = match.group(1).lower()
     status = raw_status if raw_status in VALID_SPF_STATUSES else "unknown"
 
-    # Extract client IP if present
-    ip_match = re.search(r'client-ip=([0-9a-fA-F\.:]+)', clean, re.IGNORECASE)
-    client_ip = ip_match.group(1) if ip_match else None
+    tokens = parse_segment_tokens(clean)
 
-    # Extract envelope-from / identity domain if present
-    domain_match = re.search(r'(?:envelope-from|identity)=[\'"]?([^\s;\'"]+)', clean, re.IGNORECASE)
-    domain = None
-    if domain_match:
-        full_d, _ = extract_domain(domain_match.group(1))
-        domain = full_d
+    # Extract client IP if present
+    client_ip = tokens.get("client-ip")
+
+    # Extract envelope-from / identity / mailfrom domain if present
+    mailfrom_raw = tokens.get("envelope-from") or tokens.get("identity") or tokens.get("smtp.mailfrom")
+    mailfrom_domain = None
+    if mailfrom_raw:
+        full_d, _ = extract_domain(mailfrom_raw)
+        mailfrom_domain = full_d
     else:
         # Fallback: check "domain of <domain>"
-        d_of_match = re.search(r'domain of\s+[\'"]?([^\s;\'"\)]+)', clean, re.IGNORECASE)
+        d_of_match = re.search(r'domain of\s+[\'"]?([^\s;\'"\)]+)', spf_str, re.IGNORECASE)
         if d_of_match:
             full_d, _ = extract_domain(d_of_match.group(1))
-            domain = full_d
+            mailfrom_domain = full_d
 
-    return SpfAuthResult(status=status, domain=domain, client_ip=client_ip)
+    helo_raw = tokens.get("helo") or tokens.get("smtp.helo")
+    helo_domain = None
+    if helo_raw:
+        full_h, _ = extract_domain(helo_raw)
+        helo_domain = full_h
+
+    return SpfAuthResult(
+        status=status,
+        mailfrom_domain=mailfrom_domain,
+        helo_domain=helo_domain,
+        client_ip=client_ip,
+    )
 
 
-def parse_authentication_results(auth_results_str: str) -> Tuple[SpfAuthResult, DkimAuthResult, DmarcAuthResult]:
+def parse_single_authentication_results(auth_results_str: str) -> Tuple[Optional[str], SpfAuthResult, DkimAuthResult, DmarcAuthResult]:
     """
-    Parse RFC 8601 Authentication-Results header.
-    Format: authserv-id; method1=result [props]; method2=result [props]
+    Parse a single RFC 8601 Authentication-Results header into:
+    (authserv_id, spf_result, dkim_result, dmarc_result)
     """
     spf_res = SpfAuthResult()
     dkim_res = DkimAuthResult()
     dmarc_res = DmarcAuthResult()
 
     if not auth_results_str or not isinstance(auth_results_str, str):
-        return spf_res, dkim_res, dmarc_res
+        return None, spf_res, dkim_res, dmarc_res
 
-    # Strip comments inside parentheses while preserving tokens outside
-    # Replace (comment) with whitespace to prevent comment contents from spoofing keywords
-    clean_header = re.sub(r'\([^\)]*\)', ' ', auth_results_str)
+    clean_header = strip_comments(auth_results_str.strip())
+    segments = split_outside_quotes(clean_header, delimiter=';')
+    if not segments:
+        return None, spf_res, dkim_res, dmarc_res
 
-    # 1. Parse SPF method
-    spf_match = re.search(r'\bspf=([a-zA-Z]+)', clean_header, re.IGNORECASE)
-    if spf_match:
-        status_candidate = spf_match.group(1).lower()
-        if status_candidate in VALID_SPF_STATUSES:
-            spf_res.status = status_candidate
-            # Look for smtp.mailfrom or smtp.helo
-            mailfrom_match = re.search(r'smtp\.(?:mailfrom|helo)=[\'"]?([^\s;\'"]+)', clean_header, re.IGNORECASE)
-            if mailfrom_match:
-                full_d, _ = extract_domain(mailfrom_match.group(1))
-                spf_res.domain = full_d
+    # First segment contains authserv-id (and optional version)
+    first_seg = segments[0].strip()
+    authserv_tokens = first_seg.split()
+    authserv_id = authserv_tokens[0].rstrip(';').lower() if authserv_tokens else None
 
-    # 2. Parse DKIM method
-    dkim_match = re.search(r'\bdkim=([a-zA-Z]+)', clean_header, re.IGNORECASE)
-    if dkim_match:
-        status_candidate = dkim_match.group(1).lower()
-        if status_candidate in VALID_DKIM_STATUSES:
-            dkim_res.status = status_candidate
-            # Look for header.d or header.i
-            header_d = re.search(r'header\.(?:d|i)=[\'"]?([^\s;\'"]+)', clean_header, re.IGNORECASE)
-            if header_d:
-                full_d, _ = extract_domain(header_d.group(1))
+    # Remaining segments contain method-result specs
+    for seg in segments[1:]:
+        tokens = parse_segment_tokens(seg)
+
+        # 1. SPF method
+        if "spf" in tokens:
+            st = tokens["spf"].lower()
+            if st in VALID_SPF_STATUSES:
+                spf_res.status = st
+            mf = tokens.get("smtp.mailfrom") or tokens.get("envelope-from")
+            if mf:
+                full_d, _ = extract_domain(mf)
+                spf_res.mailfrom_domain = full_d
+            helo = tokens.get("smtp.helo") or tokens.get("helo")
+            if helo:
+                full_h, _ = extract_domain(helo)
+                spf_res.helo_domain = full_h
+
+        # 2. DKIM method
+        if "dkim" in tokens:
+            st = tokens["dkim"].lower()
+            if st in VALID_DKIM_STATUSES:
+                dkim_res.status = st
+                dkim_res.is_signed = True
+            # header.d is the signing domain
+            d_val = tokens.get("header.d") or tokens.get("d")
+            if d_val:
+                full_d, _ = extract_domain(d_val)
                 dkim_res.domain = full_d
-            # Look for selector header.s
-            header_s = re.search(r'header\.s=[\'"]?([^\s;\'"]+)', clean_header, re.IGNORECASE)
-            if header_s:
-                dkim_res.selector = header_s.group(1).strip()
+            # header.i is the AUID / agent identity
+            i_val = tokens.get("header.i") or tokens.get("i")
+            if i_val:
+                dkim_res.identity = i_val
+                # If d is not set, derive fallback domain from i
+                if not dkim_res.domain:
+                    full_d, _ = extract_domain(i_val)
+                    dkim_res.domain = full_d
+            # header.s is the selector
+            s_val = tokens.get("header.s") or tokens.get("s")
+            if s_val:
+                dkim_res.selector = s_val.strip()
 
-    # 3. Parse DMARC method
-    dmarc_match = re.search(r'\bdmarc=([a-zA-Z]+)', clean_header, re.IGNORECASE)
-    if dmarc_match:
-        status_candidate = dmarc_match.group(1).lower()
-        if status_candidate in VALID_DMARC_STATUSES:
-            dmarc_res.status = status_candidate
-            # Look for header.from
-            header_from = re.search(r'header\.from=[\'"]?([^\s;\'"]+)', clean_header, re.IGNORECASE)
-            if header_from:
-                full_d, _ = extract_domain(header_from.group(1))
+        # 3. DMARC method
+        if "dmarc" in tokens:
+            st = tokens["dmarc"].lower()
+            if st in VALID_DMARC_STATUSES:
+                dmarc_res.status = st
+            h_from = tokens.get("header.from") or tokens.get("from")
+            if h_from:
+                full_d, _ = extract_domain(h_from)
                 dmarc_res.domain = full_d
-            # Look for action
-            action_match = re.search(r'action=([a-zA-Z]+)', clean_header, re.IGNORECASE)
-            if action_match:
-                dmarc_res.action = action_match.group(1).lower()
+            act = tokens.get("action")
+            if act:
+                dmarc_res.action = act.lower()
+            pol = tokens.get("policy") or tokens.get("p")
+            if pol:
+                dmarc_res.policy = pol.lower()
 
-    return spf_res, dkim_res, dmarc_res
+    return authserv_id, spf_res, dkim_res, dmarc_res
 
 
-def parse_email_authentication(raw_headers: str) -> NormalizedEmailAuth:
+def parse_authentication_results(auth_results_str: str) -> Tuple[SpfAuthResult, DkimAuthResult, DmarcAuthResult]:
+    """Backward-compatible helper returning (spf, dkim, dmarc) tuple from a single header string."""
+    _, spf, dkim, dmarc = parse_single_authentication_results(auth_results_str)
+    return spf, dkim, dmarc
+
+
+def parse_email_authentication(
+    raw_headers: str,
+    trusted_authserv_ids: Optional[Set[str]] = None,
+) -> NormalizedEmailAuth:
     """
     Main entry point: parses raw email headers and returns a fully normalized,
-    standards-aware authentication representation with strict domain alignment.
-    Fails safely on malformed inputs without crashing.
+    standards-aware authentication representation with strict domain alignment,
+    trusted authserv evaluation, and zero raw header leaks.
     """
     result = NormalizedEmailAuth()
     if not raw_headers or not isinstance(raw_headers, str):
         return result
 
+    trusted_ids = trusted_authserv_ids if trusted_authserv_ids is not None else settings.trusted_authserv_ids_set
+
     try:
         parser = HeaderParser()
         parsed = parser.parsestr(raw_headers)
-        headers_dict = {k.lower(): v for k, v in parsed.items()}
 
-        from_val = headers_dict.get("from", "")
-        return_path_val = headers_dict.get("return-path", "")
-        subject_val = headers_dict.get("subject", "")
-        auth_results_val = headers_dict.get("authentication-results", "")
-        received_spf_val = headers_dict.get("received-spf", "")
-        dkim_sig_val = headers_dict.get("dkim-signature", "")
+        from_list = parsed.get_all("From", [])
+        return_path_list = parsed.get_all("Return-Path", [])
+        auth_results_list = parsed.get_all("Authentication-Results", [])
+        received_spf_list = parsed.get_all("Received-SPF", [])
+        dkim_sig_list = parsed.get_all("DKIM-Signature", [])
 
-        result.from_header = from_val
-        result.return_path_header = return_path_val
-        result.subject = subject_val
+        # 1. Parse Authentication-Results with precedence for trusted authserv-ids
+        if auth_results_list:
+            result.auth_headers_present = True
+            chosen_authserv_id: Optional[str] = None
+            chosen_spf = SpfAuthResult()
+            chosen_dkim = DkimAuthResult()
+            chosen_dmarc = DmarcAuthResult()
+            found_trusted = False
 
-        # 1. Parse Authentication-Results (preferred explicit standard)
-        if auth_results_val:
-            spf_ar, dkim_ar, dmarc_ar = parse_authentication_results(auth_results_val)
-            if spf_ar.status != "unknown":
-                result.spf = spf_ar
-            if dkim_ar.status != "unknown":
-                result.dkim = dkim_ar
-            if dmarc_ar.status != "unknown":
-                result.dmarc = dmarc_ar
+            # First pass: check for any trusted authserv ID match
+            for ar_val in auth_results_list:
+                authserv_id, spf_ar, dkim_ar, dmarc_ar = parse_single_authentication_results(ar_val)
+                if authserv_id and trusted_ids and authserv_id.lower() in trusted_ids:
+                    chosen_authserv_id = authserv_id
+                    chosen_spf, chosen_dkim, chosen_dmarc = spf_ar, dkim_ar, dmarc_ar
+                    found_trusted = True
+                    break
 
-        # 2. Parse Received-SPF if SPF is still unknown or not populated from Authentication-Results
-        if result.spf.status == "unknown" and received_spf_val:
-            spf_recv = parse_received_spf(received_spf_val)
-            if spf_recv.status != "unknown":
-                result.spf = spf_recv
+            # Second pass: if no trusted match, take the top/first valid header as untrusted
+            if not found_trusted and auth_results_list:
+                for ar_val in auth_results_list:
+                    authserv_id, spf_ar, dkim_ar, dmarc_ar = parse_single_authentication_results(ar_val)
+                    if authserv_id or spf_ar.status != "unknown" or dkim_ar.status != "unknown" or dmarc_ar.status != "unknown":
+                        chosen_authserv_id = authserv_id
+                        chosen_spf, chosen_dkim, chosen_dmarc = spf_ar, dkim_ar, dmarc_ar
+                        break
 
-        # 3. Check DKIM-Signature presence
-        if dkim_sig_val:
+            result.authserv_id = chosen_authserv_id
+            result.is_authserv_trusted = found_trusted
+            if chosen_spf.status != "unknown":
+                result.spf = chosen_spf
+            if chosen_dkim.status != "unknown":
+                result.dkim = chosen_dkim
+            if chosen_dmarc.status != "unknown":
+                result.dmarc = chosen_dmarc
+
+        # 2. Parse Received-SPF if SPF is still unknown
+        if result.spf.status == "unknown" and received_spf_list:
+            result.auth_headers_present = True
+            for spf_val in received_spf_list:
+                spf_recv = parse_received_spf(spf_val)
+                if spf_recv.status != "unknown":
+                    result.spf = spf_recv
+                    break
+
+        # If SPF was never present or parsed, set to "none" rather than converting to "fail"
+        if result.spf.status == "unknown":
+            result.spf.status = "none"
+
+        # 3. Check DKIM-Signature presence and augment selector / d= signing domain
+        if dkim_sig_list:
+            result.auth_headers_present = True
             result.dkim.is_signed = True
-            # Extract s= selector and d= domain if DKIM domain/selector not yet set
-            if not result.dkim.domain:
-                d_match = re.search(r'\bd=([^\s;]+)', dkim_sig_val, re.IGNORECASE)
-                if d_match:
-                    full_d, _ = extract_domain(d_match.group(1))
+            for dkim_sig_val in dkim_sig_list:
+                tokens = parse_segment_tokens(strip_comments(dkim_sig_val))
+                if not result.dkim.domain and "d" in tokens:
+                    full_d, _ = extract_domain(tokens["d"])
                     result.dkim.domain = full_d
-            if not result.dkim.selector:
-                s_match = re.search(r'\bs=([^\s;]+)', dkim_sig_val, re.IGNORECASE)
-                if s_match:
-                    result.dkim.selector = s_match.group(1).strip()
+                if not result.dkim.selector and "s" in tokens:
+                    result.dkim.selector = tokens["s"].strip()
+                if not result.dkim.identity and "i" in tokens:
+                    result.dkim.identity = tokens["i"].strip()
 
-        # 4. Domain Normalization & Identifier Alignment
-        from_email = extract_email_address(from_val)
-        from_full, from_reg = extract_domain(from_email or from_val)
+        # If DKIM was never present or parsed, set to "none" rather than converting to "fail"
+        if result.dkim.status == "unknown":
+            result.dkim.status = "none"
 
-        rp_email = extract_email_address(return_path_val)
-        rp_full, rp_reg = extract_domain(rp_email or return_path_val)
+        # If DMARC was never present or parsed, set to "none"
+        if result.dmarc.status == "unknown":
+            result.dmarc.status = "none"
 
+        # 4. Extract sender and return path addresses/domains
+        from_raw = from_list[0] if from_list else ""
+        return_path_raw = return_path_list[0] if return_path_list else ""
+
+        from_email = extract_email_address(from_raw)
+        from_full, from_reg = extract_domain(from_email or from_raw)
+
+        rp_email = extract_email_address(return_path_raw)
+        rp_full, rp_reg = extract_domain(rp_email or return_path_raw)
+
+        # SPF mailfrom domain alignment
+        spf_mf_domain = result.spf.mailfrom_domain or rp_full
+        spf_mf_full, spf_mf_reg = extract_domain(spf_mf_domain or "")
+
+        # DKIM domain alignment (uses d= signing domain)
         dkim_full, dkim_reg = extract_domain(result.dkim.domain or "")
 
         result.alignment.from_domain = from_full
         result.alignment.from_registered_domain = from_reg
         result.alignment.return_path_domain = rp_full
         result.alignment.return_path_registered_domain = rp_reg
+        result.alignment.spf_mailfrom_domain = spf_mf_full
+        result.alignment.spf_mailfrom_registered_domain = spf_mf_reg
+        result.alignment.spf_helo_domain = result.spf.helo_domain
         result.alignment.dkim_domain = dkim_full
         result.alignment.dkim_registered_domain = dkim_reg
 
-        # Sender Mismatch: From and Return-Path are both present, have registered domains, and do not match
+        # Sender Mismatch: From registered domain != Return-Path registered domain
         if from_reg and rp_reg:
             result.alignment.sender_mismatch = (from_reg != rp_reg)
         else:
             result.alignment.sender_mismatch = False
 
-        # SPF Alignment: Return-Path registered domain matches From registered domain
-        if from_reg and rp_reg:
+        # SPF Alignment (RFC 7489 Section 3.1.2): From registered domain == SPF MailFrom registered domain
+        if from_reg and spf_mf_reg:
+            result.alignment.spf_aligned = (from_reg == spf_mf_reg)
+        elif from_reg and rp_reg:
             result.alignment.spf_aligned = (from_reg == rp_reg)
+        else:
+            result.alignment.spf_aligned = False
 
-        # DKIM Alignment: DKIM signing registered domain matches From registered domain
+        # DKIM Alignment (RFC 7489 Section 3.1.1): From registered domain == DKIM signing registered domain (d=)
         if from_reg and dkim_reg:
             result.alignment.dkim_aligned = (from_reg == dkim_reg)
+        else:
+            result.alignment.dkim_aligned = False
 
         # DMARC Alignment: At least one of SPF (with pass) or DKIM (with pass) is aligned with From header
         spf_pass_aligned = (result.spf.status == "pass" and result.alignment.spf_aligned)

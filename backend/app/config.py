@@ -45,8 +45,17 @@ class Settings:
     AUTH_COOKIE_SECURE: bool = os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
     AUTH_COOKIE_SAMESITE: str = os.getenv("AUTH_COOKIE_SAMESITE", "lax").lower()
 
+    # Comma-separated list of trusted Authentication-Results authserv-id hostnames/domains
+    TRUSTED_AUTHSERV_IDS: str = os.getenv("TRUSTED_AUTHSERV_IDS", "")
+
     HOST: str = os.getenv("HOST", "127.0.0.1")
     PORT: int = int(os.getenv("PORT", "8000"))
+
+    @property
+    def trusted_authserv_ids_set(self) -> set[str]:
+        if not self.TRUSTED_AUTHSERV_IDS:
+            return set()
+        return {x.strip().lower() for x in self.TRUSTED_AUTHSERV_IDS.split(",") if x.strip()}
 
 
 settings = Settings()
