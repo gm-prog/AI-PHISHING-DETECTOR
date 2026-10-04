@@ -1,13 +1,13 @@
 # Production Web Security Hardening & Adversarial Security Review
 
-**Target System**: SENTINEL AI — Threat Intelligence Gateway  
-**Date**: September 21, 2026  
+**Target System**: SENTINEL AI — Threat Intelligence Gateway
+**Date**: October 4, 2026
 **Auditor**: Senior Application Security Engineer (Antigravity Agent)
 
 ---
 
 ## 1. Executive Summary
-A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, and all 11 security regression tests executed with 100% pass rate.
+A comprehensive security review and defense-in-depth hardening was conducted across the SENTINEL AI Threat Intelligence Gateway architecture. The repository's trust boundaries were mapped, threat vectors analyzed via STRIDE principles, security headers and log redaction enforced, and all 47 backend tests (covering 45 security hardening specifications and 2 standalone API regression tests) executed with a 100% pass rate.
 
 ---
 
@@ -15,13 +15,13 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 
 ### 2.1 Component Mapping
 - **Client Tier**: React 18 SPA + Vite + TypeScript (Browser)
-- **API Gateway Tier**: FastAPI + Uvicorn (Python 3.12)
+- **API Gateway Tier**: FastAPI + Uvicorn (Python 3.11+)
 - **Data Tier**: SQLite ORM (`phishing_detector.db`) + SQLAlchemy 2.0 with dynamic user scoping
 - **External AI Tier**: Google Gemini 3.6 Flash (`models/gemini-3.6-flash` via `google-genai` Interactions API)
-- **External Intelligence Tier**: VirusTotal API & URLhaus Feed
+- **External Intelligence Tier**: VirusTotal API & URLhaus Threat Feed
 
 ### 2.2 STRIDE Analysis
-### 2.3 Analysis Abuse & AI Gateway Controls (Gateway v1.2)
+### 2.3 Analysis Abuse & AI Gateway Controls (Gateway v1.2.1)
 - `/api/analyze` enforces two independent fixed-window limits: **10 requests/minute** (burst protection) and **100 requests/day** (daily expensive-analysis quota).
 - **Stable Account Quota**: The daily quota is keyed to the stable database user ID (`analysis-user:<sha256(user_id)>`) for authenticated users, precomputed during the ASGI request lifecycle onto `request.state` to avoid redundant database lookups.
 - **Fail-Closed Quota Semantics**: If an authenticated session is invalid, expired, or unresolvable, the gateway fails closed (HTTP 401/500) rather than silently degrading to an anonymous IP bucket.
@@ -29,7 +29,7 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 - **Burst Isolation**: Authenticated burst limiter identity is a SHA-256 digest of client IP + opaque session token (`session:<hash>`).
 - **Gemini No-Storage Mode**: The primary Interactions API explicitly specifies `store=False` on all analysis and key-verification requests to opt out of server-side data retention. The Generate Content compatibility fallback path is non-persistent by default in Google's API architecture. Raw prompts, raw completions, and raw third-party provider responses are excluded from logs and persistent storage.
 - **Sanitized History Preview**: Application-level `ScanHistory` records retain only a sanitized, bounded 100-character preview of user input (with passwords, bearer tokens, API keys, and card numbers masked) for dashboard display.
-- **Prompt Injection Defense & Untrusted Boundaries**: User inputs are strictly treated as hostile untrusted data enclosed in `<UNTRUSTED_INPUT>` delimiters, while server-side baseline facts are isolated within `<TRUSTED_HEURISTICS>`. The application enforces a strict heuristic score floor and server-derived status classification.
+- **Dynamic Prompt Boundary Integrity**: User inputs are treated as hostile untrusted data enclosed in dynamic, per-request high-entropy boundary tags (`<UNTRUSTED_INPUT boundary="...">`), preventing attackers from prematurely terminating boundaries with injected tags. Server-side baseline facts are isolated within `<TRUSTED_HEURISTICS boundary="...">`. The application enforces a strict heuristic score floor and server-derived status classification (defense-in-depth).
 - **Pydantic LLM Output Validation**: All provider outputs are strictly validated through `LlmPhishingAnalysisSchema` (0..100 score bounds, literal status and severity enums, bounded string lengths and signal counts) before consumption, with safe fallback on validation failures.
 - **Embedded URL Budget**: Email analysis bounds embedded URL processing to `MAX_EXTRACTED_URLS` (default: 25) before running heuristic or external intel checks, mitigating resource amplification.
 - **Bounded Provider Queue**: Concurrency slots for Gemini, VirusTotal, and URLhaus require acquiring semaphore permits within a bounded queue timeout (2.0s) before executing operations with independent hard timeouts.
@@ -60,16 +60,18 @@ A comprehensive security review and defense-in-depth hardening was conducted acr
 
 ## 4. Verification Evidence & Test Execution
 
-```powershell
-============================= test session starts =============================
-platform win32 -- Python 3.12.5, pytest-9.1.1, pluggy-1.6.0
-rootdir: C:\Users\deysa\OneDrive\Documents\Ai phishing detector\backend
-plugins: anyio-4.13.0
-collected 11 items
+```bash
+============================= test session starts ==============================
+platform linux -- Python 3.11.2, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/user/AI-PHISHING-DETECTOR
+plugins: anyio-4.15.1, platformdirs-4.12.3
+collected 47 items
 
-tests\test_security_hardening.py ...........                             [100%]
+backend/test_backend.py ..                                               [  4%]
+backend/tests/test_security_hardening.py ............................... [ 70%]
+..............................                                           [100%]
 
-============================= 11 passed in 7.88s ==============================
+============================== 47 passed in 12.67s =============================
 ```
 
 ---
@@ -95,6 +97,6 @@ tests\test_security_hardening.py ...........                             [100%]
 | **15. Secure Server Logic** | Implemented | `backend/app/services/llm_service.py` (Gemini 3.6 Flash) | VERIFIED |
 | **16. Trim API Responses** | Implemented | `backend/app/models/schemas.py` (`UserOut`) | VERIFIED |
 | **17. Secure Auth Sessions** | Implemented | `backend/app/auth.py` (Opaque Session Cookies, bcrypt) | VERIFIED (`test_user_registration_and_login`) |
-| **18. Scan Dependencies** | Implemented | `npm audit` & `pip` package verification | VERIFIED |
+| **18. Scan Dependencies** | Implemented | `npm audit` & `pip-audit` package verification | VERIFIED |
 | **19. Test Record Access** | Implemented | `backend/app/main.py` (`delete_history`) | VERIFIED (`test_scoped_history_bulk_clear`) |
-| **20. Attack Your Own App** | Implemented | `backend/tests/test_security_hardening.py` | VERIFIED (11/11 Passed) |
+| **20. Attack Your Own App** | Implemented | `backend/tests/test_security_hardening.py` | VERIFIED (47/47 Passed) |

@@ -27,10 +27,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run security tests
+      - name: Run backend tests
         env:
           PYTHONPATH: .
-        run: pytest -q tests/test_security_hardening.py
+        run: pytest -q
 
       - name: Run Bandit
         run: pip install bandit && bandit -q -r app
