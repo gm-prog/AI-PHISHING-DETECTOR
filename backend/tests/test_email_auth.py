@@ -86,8 +86,8 @@ def test_parse_authentication_results_rfc8601():
     assert spf.helo_domain == "mail.legit-bank.com"
 
     assert dkim.status == "pass"
-    assert dkim.domain == "legit-bank.com"
     assert dkim.selector == "2026_s1"
+    assert dkim.identity == "@legit-bank.com"
 
     assert dmarc.status == "pass"
     assert dmarc.domain == "legit-bank.com"
@@ -132,10 +132,8 @@ def test_structural_rfc_grammar_not_confused_by_quoted_reason_or_comments():
     assert spf.mailfrom_domain == "example.com"
 
 
-def test_dkim_d_vs_i_alignment_semantics():
-    """
-    Verify RFC 7489 DKIM alignment uses d= (signing domain), while i= (identity) is captured separately.
-    """
+def test_dkim_d_present_i_present_alignment():
+    """Verify RFC 7489 DKIM alignment uses d= (signing domain) when both d= and i= are present."""
     headers = (
         "From: Alice <alice@example.com>\n"
         "Return-Path: <alice@example.com>\n"
@@ -151,32 +149,109 @@ def test_dkim_d_vs_i_alignment_semantics():
     assert auth.alignment.dmarc_aligned is True
 
 
-def test_spf_mailfrom_vs_helo_alignment_semantics():
+def test_dkim_d_missing_i_present_no_fallback():
     """
-    Verify DMARC SPF alignment uses MAIL FROM (smtp.mailfrom), not HELO (smtp.helo).
+    Requirement A5: If d= is missing, signing_domain MUST NOT be derived from i=.
     """
+    raw_ar = "mx.google.com; dkim=pass header.i=agent1@dept.corp.example.com header.s=s1"
+    authserv, spf, dkim, dmarc = parse_single_authentication_results(raw_ar)
+    assert dkim.identity == "agent1@dept.corp.example.com"
+    assert dkim.domain is None  # Must NOT infer domain from i=
+
     headers = (
-        "From: Support <support@paypal.com>\n"
-        "Return-Path: <support@paypal.com>\n"
-        "Authentication-Results: mx.google.com; "
-        "spf=pass smtp.mailfrom=support@paypal.com smtp.helo=outbound.generic-relay-provider.net; "
-        "dkim=pass header.d=paypal.com\n"
+        "From: Alice <alice@example.com>\n"
+        "Return-Path: <alice@example.com>\n"
+        f"Authentication-Results: {raw_ar}\n"
     )
     auth = parse_email_authentication(headers)
-    assert auth.alignment.spf_mailfrom_registered_domain == "paypal.com"
-    assert auth.alignment.spf_helo_domain == "outbound.generic-relay-provider.net"
-    assert auth.alignment.spf_aligned is True
+    assert auth.dkim.domain is None
+    assert auth.alignment.dkim_aligned is False
+
+
+def test_dkim_i_unrelated_domain_does_not_break_d_alignment():
+    """Verify i= having an unrelated domain does not corrupt valid d= alignment."""
+    headers = (
+        "From: Notifications <alerts@paypal.com>\n"
+        "Return-Path: <alerts@paypal.com>\n"
+        "Authentication-Results: mx.google.com; "
+        "dkim=pass header.d=paypal.com header.i=external-agent@third-party-relay.org; "
+        "spf=pass smtp.mailfrom=alerts@paypal.com\n"
+    )
+    auth = parse_email_authentication(headers)
+    assert auth.dkim.domain == "paypal.com"
+    assert auth.dkim.identity == "external-agent@third-party-relay.org"
+    assert auth.alignment.dkim_aligned is True
+
+
+def test_multiple_dkim_signatures_preserved():
+    """
+    Requirement A6: Multiple DKIM signatures must all be preserved in dkim_signatures.
+    """
+    headers = (
+        "From: Newsletter <news@company.com>\n"
+        "Return-Path: <news@company.com>\n"
+        "DKIM-Signature: v=1; a=rsa-sha256; d=company.com; s=2026k1; i=@company.com; b=sig1;\n"
+        "DKIM-Signature: v=1; a=rsa-sha256; d=marketing-esp.net; s=esp1; i=@marketing-esp.net; b=sig2;\n"
+    )
+    auth = parse_email_authentication(headers)
+    assert len(auth.dkim_signatures) == 2
+    assert auth.dkim_signatures[0].domain == "company.com"
+    assert auth.dkim_signatures[1].domain == "marketing-esp.net"
+    assert auth.alignment.dkim_aligned is True
+
+
+def test_spf_mailfrom_vs_return_path_and_helo():
+    """
+    Requirement A8 & A9:
+    - SPF alignment uses authenticated MAIL FROM (smtp.mailfrom), not Return-Path.
+    - HELO is preserved purely as diagnostic context.
+    """
+    # Case 1: MAIL FROM differs from Return-Path
+    headers_diff = (
+        "From: Billing <billing@trusted.com>\n"
+        "Return-Path: <bounce@unrelated-bounce-host.net>\n"
+        "Authentication-Results: mx.google.com; "
+        "spf=pass smtp.mailfrom=billing@trusted.com smtp.helo=smtp-out.relay.org; "
+        "dkim=pass header.d=trusted.com\n"
+    )
+    auth1 = parse_email_authentication(headers_diff)
+    assert auth1.alignment.spf_mailfrom_domain == "trusted.com"
+    assert auth1.alignment.spf_helo_domain == "smtp-out.relay.org"
+    assert auth1.alignment.spf_aligned is True
+    assert auth1.alignment.sender_mismatch is True  # From (trusted.com) != Return-Path (unrelated-bounce-host.net)
+
+    # Case 2: MAIL FROM missing in SPF record -> no SPF alignment
+    headers_no_mf = (
+        "From: Billing <billing@trusted.com>\n"
+        "Return-Path: <billing@trusted.com>\n"
+        "Authentication-Results: mx.google.com; spf=pass smtp.helo=smtp-out.relay.org; dkim=none\n"
+    )
+    auth2 = parse_email_authentication(headers_no_mf)
+    assert auth2.alignment.spf_mailfrom_domain is None
+    assert auth2.alignment.spf_aligned is False
+
+    # Case 3: HELO aligned with From, but MAIL FROM is unaligned
+    headers_helo_aligned = (
+        "From: Billing <billing@trusted.com>\n"
+        "Return-Path: <attacker@evil.com>\n"
+        "Authentication-Results: mx.google.com; "
+        "spf=pass smtp.mailfrom=attacker@evil.com smtp.helo=trusted.com; dkim=none\n"
+    )
+    auth3 = parse_email_authentication(headers_helo_aligned)
+    assert auth3.alignment.spf_mailfrom_domain == "evil.com"
+    assert auth3.alignment.spf_helo_domain == "trusted.com"
+    assert auth3.alignment.spf_aligned is False  # Must NOT use HELO for DMARC SPF alignment
 
 
 def test_authserv_id_trust_boundary_and_multiple_headers():
     """
     Verify trust boundary:
-    1. Untrusted authserv-id sets is_authserv_trusted=False.
+    1. Untrusted authserv-id sets is_authserv_trusted=False and evidence_source='untrusted_auth_results'.
     2. Multiple headers select the trusted authserv-id when configured.
     """
     trusted_set = {"mx.google.com", "protection.outlook.com"}
 
-    # Case 1: Untrusted authserv ID
+    # Case 1: Untrusted authserv ID claiming trusted pass
     headers_untrusted = (
         "From: User <user@example.com>\n"
         "Authentication-Results: untrusted-internal-hop.local; dkim=pass header.d=example.com; spf=pass\n"
@@ -184,9 +259,10 @@ def test_authserv_id_trust_boundary_and_multiple_headers():
     auth1 = parse_email_authentication(headers_untrusted, trusted_authserv_ids=trusted_set)
     assert auth1.authserv_id == "untrusted-internal-hop.local"
     assert auth1.is_authserv_trusted is False
+    assert auth1.evidence_source == "untrusted_auth_results"
     assert auth1.auth_headers_present is True
 
-    # Case 2: Multiple headers where intermediate hop is untrusted but gateway is trusted
+    # Case 2: Multiple headers where top hop is untrusted but gateway is trusted
     headers_multiple = (
         "From: User <user@example.com>\n"
         "Authentication-Results: untrusted-relay.net; dkim=pass header.d=attacker.com\n"
@@ -195,8 +271,54 @@ def test_authserv_id_trust_boundary_and_multiple_headers():
     auth2 = parse_email_authentication(headers_multiple, trusted_authserv_ids=trusted_set)
     assert auth2.authserv_id == "mx.google.com"
     assert auth2.is_authserv_trusted is True
+    assert auth2.evidence_source == "trusted_auth_results"
     assert auth2.dkim.domain == "example.com"
     assert auth2.alignment.dkim_aligned is True
+
+
+def test_untrusted_auth_results_cannot_trigger_authoritative_scoring():
+    """
+    Requirement A4 & A11: Prove that untrusted authentication claims (e.g. attacker-crafted
+    Authentication-Results: evil.corp; spf=fail; dkim=fail; dmarc=fail) CANNOT trigger the
+    authoritative high-severity failure penalties (+95 compound score) that trusted gateway results trigger.
+    """
+    # Attacker crafts headers with fake failure claims under untrusted authserv
+    attacker_headers = (
+        "From: Alice <alice@example.com>\n"
+        "Return-Path: <alice@example.com>\n"
+        "Authentication-Results: attacker-relay.bad; spf=fail; dkim=fail; dmarc=fail\n"
+    )
+
+    res_untrusted = analyze_email_headers(attacker_headers)
+
+    # Score must be low (e.g. <= 10), NOT the critical 95+ from verified receiver failures
+    assert res_untrusted["risk_score"] <= 10
+    signal_ids = [s["id"] for s in res_untrusted["signals"]]
+    assert "spf_fail" not in signal_ids
+    assert "dkim_fail" not in signal_ids
+    assert "dmarc_fail" not in signal_ids
+    assert "compound_sender_spoof_and_spf_fail" not in signal_ids
+    assert "compound_spf_and_dkim_fail" not in signal_ids
+    assert "untrusted_auth_claim" in signal_ids
+
+
+def test_trusted_auth_results_triggers_authoritative_scoring(monkeypatch):
+    """Prove that trusted gateway failures correctly trigger authoritative penalties."""
+    monkeypatch.setattr("app.config.settings.TRUSTED_AUTHSERV_IDS", "mx.google.com")
+
+    trusted_headers = (
+        "From: Alice <alice@example.com>\n"
+        "Return-Path: <attacker@evil.com>\n"
+        "Authentication-Results: mx.google.com; spf=fail; dkim=fail; dmarc=fail\n"
+    )
+    res_trusted = analyze_email_headers(trusted_headers)
+
+    assert res_trusted["risk_score"] >= 95
+    signal_ids = [s["id"] for s in res_trusted["signals"]]
+    assert "spf_fail" in signal_ids
+    assert "dkim_fail" in signal_ids
+    assert "dmarc_fail" in signal_ids
+    assert "sender_domain_mismatch" in signal_ids
 
 
 def test_email_alignment_same_and_subdomain():
@@ -249,25 +371,6 @@ def test_analyze_email_headers_all_pass():
     assert res["details"]["sender_mismatch"] is False
 
 
-def test_analyze_email_headers_spf_fail_and_sender_spoof():
-    """Verify critical compounding risk when sender is forged and SPF fails."""
-    headers = (
-        "From: Apple Security <security@apple.com>\n"
-        "Return-Path: <badguy@malicious-relay.org>\n"
-        "Subject: Urgent: iCloud Account Access Restricted\n"
-        "Received-SPF: fail (relay.net: domain of apple.com does not designate 192.0.2.1 as permitted sender)\n"
-        "Authentication-Results: mx.google.com; dkim=fail; dmarc=fail"
-    )
-    res = analyze_email_headers(headers)
-    assert res["risk_score"] >= 95
-    signal_ids = [s["id"] for s in res["signals"]]
-    assert "sender_domain_mismatch" in signal_ids
-    assert "spf_fail" in signal_ids
-    assert "dkim_fail" in signal_ids
-    assert "dmarc_fail" in signal_ids
-    assert "compound_sender_spoof_and_spf_fail" in signal_ids
-
-
 def test_analyze_email_headers_unknown_and_missing_are_not_failures():
     """Verify missing DKIM or unknown SPF does NOT penalize benign unsigned emails."""
     headers = (
@@ -302,7 +405,6 @@ def test_email_header_privacy_boundary_zero_raw_headers_persisted():
     res = analyze_email_headers(headers)
     details = res["details"]
 
-    # Verify absence of raw PII/sensitive strings
     assert "from" not in details or details["from"] != sensitive_from
     assert "return_path" not in details or details["return_path"] != sensitive_rp
     assert "subject" not in details or details["subject"] != sensitive_subject
@@ -310,7 +412,6 @@ def test_email_header_privacy_boundary_zero_raw_headers_persisted():
     assert "Project Alpha" not in str(details)
     assert "987654321" not in str(details)
 
-    # Verify structured normalized domain and status properties are present
     assert details["from_domain"] == "internal-bank.com"
     assert details["from_registered_domain"] == "internal-bank.com"
     assert details["spf_status"] == "pass"

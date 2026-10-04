@@ -147,6 +147,7 @@ def extract_domain_from_email(email_str: str) -> str:
 def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
     """
     Parses email headers and performs standards-aware SPF, DKIM, DMARC, and domain alignment verification.
+    Scoring is strictly trust-aware: untrusted Authentication-Results cannot trigger authoritative failure penalties.
     Sanitizes all outputs: raw header blocks and raw PII strings are never retained in details.
     """
     signals = []
@@ -189,10 +190,12 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
         "return_path_domain": auth.alignment.return_path_domain,
         "return_path_registered_domain": auth.alignment.return_path_registered_domain,
         "spf_mailfrom_domain": auth.alignment.spf_mailfrom_domain,
+        "spf_mailfrom_registered_domain": auth.alignment.spf_mailfrom_registered_domain,
         "spf_helo_domain": auth.alignment.spf_helo_domain,
         "spf_status": auth.spf.status,
         "dkim_status": dkim_display_status,
         "dkim_domain": auth.alignment.dkim_domain,
+        "dkim_signatures_count": len(auth.dkim_signatures),
         "dkim_selector": auth.dkim.selector,
         "dmarc_status": auth.dmarc.status,
         "spf_aligned": auth.alignment.spf_aligned,
@@ -201,6 +204,9 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
         "sender_mismatch": auth.alignment.sender_mismatch,
         "authserv_id": auth.authserv_id,
         "is_authserv_trusted": auth.is_authserv_trusted,
+        "authserv_trusted": auth.authserv_trusted,
+        "evidence_source": auth.evidence_source,
+        "authentication_results_present": auth.authentication_results_present,
         "auth_headers_present": auth.auth_headers_present,
         "subject_urgent_flags": urgent_flags,
     }
@@ -218,74 +224,99 @@ def analyze_email_headers(raw_headers: str) -> Dict[str, Any]:
             "description": f"The visual sender domain ({from_d}) does not match the delivery address domain ({rp_d}). This is a strong indicator of header spoofing.",
         })
 
-    # 3. Check SPF status
-    has_spf_fail = auth.spf.status == "fail"
-    if has_spf_fail:
-        base_risk += 35
-        signals.append({
-            "id": "spf_fail",
-            "severity": "high",
-            "title": "SPF Authentication Failure",
-            "description": "The Sender Policy Framework (SPF) check failed. The sending server is NOT authorized to send emails on behalf of this domain.",
-        })
-    elif auth.spf.status == "softfail":
-        base_risk += 15
-        signals.append({
-            "id": "spf_softfail",
-            "severity": "medium",
-            "title": "SPF Authentication Softfail",
-            "description": "SPF records suggest the sending server is not fully authorized, but the policy is set to soft-fail.",
-        })
-    elif auth.spf.status in ("temperror", "permerror"):
-        base_risk += 10
-        signals.append({
-            "id": f"spf_{auth.spf.status}",
-            "severity": "medium",
-            "title": f"SPF Evaluation {auth.spf.status.capitalize()}",
-            "description": f"The SPF record evaluation resulted in a {auth.spf.status}.",
-        })
+    # 3. Check Authentication Results: Authoritative vs Untrusted Claim Scoring
+    is_trusted_auth = auth.is_authserv_trusted or auth.evidence_source == "received_spf_header"
 
-    # 4. Check DKIM Status (Note: missing/none is NOT scored as a failure)
-    has_dkim_fail = auth.dkim.status == "fail"
-    if has_dkim_fail:
-        base_risk += 25
-        signals.append({
-            "id": "dkim_fail",
-            "severity": "high",
-            "title": "DKIM Verification Failed",
-            "description": "The DKIM digital signature is invalid, meaning the email body or headers were modified in transit or signed with an invalid key.",
-        })
+    has_spf_fail = False
+    has_dkim_fail = False
+    has_dmarc_fail = False
 
-    # 5. Check DMARC Status
-    has_dmarc_fail = auth.dmarc.status == "fail"
-    if has_dmarc_fail:
-        base_risk += 25
-        signals.append({
-            "id": "dmarc_fail",
-            "severity": "high",
-            "title": "DMARC Policy Failure",
-            "description": "The message failed DMARC authentication and alignment policy checks.",
-        })
+    if is_trusted_auth:
+        # Trusted gateway evaluation: apply authoritative failure scoring
+        if auth.spf.status == "fail":
+            has_spf_fail = True
+            base_risk += 35
+            signals.append({
+                "id": "spf_fail",
+                "severity": "high",
+                "title": "SPF Authentication Failure",
+                "description": "The Sender Policy Framework (SPF) check failed. The sending server is NOT authorized to send emails on behalf of this domain.",
+            })
+        elif auth.spf.status == "softfail":
+            base_risk += 15
+            signals.append({
+                "id": "spf_softfail",
+                "severity": "medium",
+                "title": "SPF Authentication Softfail",
+                "description": "SPF records suggest the sending server is not fully authorized, but the policy is set to soft-fail.",
+            })
+        elif auth.spf.status in ("temperror", "permerror"):
+            base_risk += 10
+            signals.append({
+                "id": f"spf_{auth.spf.status}",
+                "severity": "medium",
+                "title": f"SPF Evaluation {auth.spf.status.capitalize()}",
+                "description": f"The SPF record evaluation resulted in a {auth.spf.status}.",
+            })
 
-    # Compounding Boost Rules for Headers
-    # Rule A: Sender Domain Mismatch + SPF Fail = Critical Threat
-    if has_sender_mismatch and has_spf_fail:
-        base_risk = max(base_risk, 95)
-        signals.append({
-            "id": "compound_sender_spoof_and_spf_fail",
-            "severity": "high",
-            "title": "Critical Risk: Forged Sender with SPF Failure",
-            "description": "The sending server failed SPF authentication AND the visual sender domain is spoofed. This is certain header forgery.",
-        })
-    # Rule B: SPF Fail + DKIM Fail = Add +15 points compound boost
-    elif has_spf_fail and has_dkim_fail:
-        base_risk += 15
-        signals.append({
-            "id": "compound_spf_and_dkim_fail",
-            "severity": "high",
-            "title": "Compounded Risk: SPF & DKIM Authentication Failure",
-            "description": "Both SPF and DKIM checks failed. The message is completely unauthenticated and likely forged.",
-        })
+        if auth.dkim.status == "fail":
+            has_dkim_fail = True
+            base_risk += 25
+            signals.append({
+                "id": "dkim_fail",
+                "severity": "high",
+                "title": "DKIM Verification Failed",
+                "description": "The DKIM digital signature is invalid, meaning the email body or headers were modified in transit or signed with an invalid key.",
+            })
+
+        if auth.dmarc.status == "fail":
+            has_dmarc_fail = True
+            base_risk += 25
+            signals.append({
+                "id": "dmarc_fail",
+                "severity": "high",
+                "title": "DMARC Policy Failure",
+                "description": "The message failed DMARC authentication and alignment policy checks.",
+            })
+
+        # Compounding Boost Rules for Verified Headers
+        # Rule A: Sender Domain Mismatch + SPF Fail = Critical Threat
+        if has_sender_mismatch and has_spf_fail:
+            base_risk = max(base_risk, 95)
+            signals.append({
+                "id": "compound_sender_spoof_and_spf_fail",
+                "severity": "high",
+                "title": "Critical Risk: Forged Sender with SPF Failure",
+                "description": "The sending server failed SPF authentication AND the visual sender domain is spoofed. This is certain header forgery.",
+            })
+        # Rule B: SPF Fail + DKIM Fail = Add +15 points compound boost
+        elif has_spf_fail and has_dkim_fail:
+            base_risk += 15
+            signals.append({
+                "id": "compound_spf_and_dkim_fail",
+                "severity": "high",
+                "title": "Compounded Risk: SPF & DKIM Authentication Failure",
+                "description": "Both SPF and DKIM checks failed. The message is completely unauthenticated and likely forged.",
+            })
+
+    elif auth.evidence_source == "untrusted_auth_results":
+        # Untrusted claims: surface diagnostic metadata without applying authoritative failure penalties
+        untrusted_claims = []
+        if auth.spf.status in ("fail", "softfail"):
+            untrusted_claims.append(f"SPF: {auth.spf.status}")
+        if auth.dkim.status == "fail":
+            untrusted_claims.append("DKIM: fail")
+        if auth.dmarc.status == "fail":
+            untrusted_claims.append("DMARC: fail")
+
+        if untrusted_claims:
+            base_risk += 5
+            signals.append({
+                "id": "untrusted_auth_claim",
+                "severity": "low",
+                "title": "Untrusted Authentication Header Claim",
+                "description": f"The message header contains an unverified Authentication-Results claim ({', '.join(untrusted_claims)}) from untrusted authserv '{auth.authserv_id or 'unknown'}'. This is evaluated as diagnostic claim metadata, not verified receiver evidence.",
+            })
 
     risk_score = min(base_risk, 100)
 
