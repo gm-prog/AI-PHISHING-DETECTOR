@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import uuid
+from app import telemetry
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Protocol, Tuple, runtime_checkable, Union
@@ -863,6 +864,7 @@ def lookup_threat_indicator(db: Session, indicator_type: str, value: str) -> Opt
         return None
 
 
+@telemetry.feed_operation
 async def refresh_threat_feed(
     db: Session,
     provider: ThreatFeedProvider,
@@ -1144,9 +1146,8 @@ async def refresh_threat_feed(
 
             duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
             logger.info(
-                "event=threat_feed_refresh_success source=%s gen=%s count=%d",
-                source_name,
-                generation_id,
+                "event=threat_feed_refresh_success source=%s count=%d",
+                telemetry.bounded(source_name, telemetry.SOURCES),
                 len(valid_records),
             )
             return {
@@ -1188,9 +1189,16 @@ async def refresh_all_threat_feeds(
     providers: Optional[List[ThreatFeedProvider]] = None,
 ) -> List[Dict[str, Any]]:
     """Synchronize all registered threat feeds sequentially with bounded execution."""
-    feed_providers = providers or list(get_registered_providers().values())
+    feed_providers = list(get_registered_providers().values()) if providers is None else providers
     results = []
     for prov in feed_providers:
-        res = await refresh_threat_feed(db, prov)
+        try:
+            res = await refresh_threat_feed(db, prov)
+        except Exception:
+            # Restore session usability before continuing. If rollback itself fails,
+            # abort the job rather than claiming later sources were attempted safely.
+            db.rollback()
+            res = {"source": telemetry.bounded(prov.source_name, telemetry.SOURCES),
+                   "status": "failed", "error_code": "unexpected"}
         results.append(res)
     return results

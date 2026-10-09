@@ -133,7 +133,8 @@ All keys are server-side only and never leaked to frontend clients or persisted 
 
 | Method | Endpoint | Access Control | Description |
 |--------|----------|----------------|-------------|
-| `GET` | `/api/health` | Public | Backend health telemetry |
+| `GET` | `/api/health` | Public | Cheap process liveness and CSRF bootstrap (no DB/provider query) |
+| `GET` | `/api/ready` | Public | DB connectivity readiness: 200 ready / 503 sanitized unavailable |
 | `POST` | `/api/auth/register` | Public (5/min) | Account registration with HttpOnly session |
 | `POST` | `/api/auth/login` | Public (5/min) | Authentication with HttpOnly session |
 | `POST` | `/api/auth/logout` | Public/Auth | Session revocation and cookie clearance |
@@ -175,3 +176,17 @@ PYTHONPATH=backend pytest backend/tests
 | 0–29 | ✅ Safe | No significant phishing indicators detected |
 | 30–69 | ⚠️ Warning | Suspicious patterns found — verify independently |
 | 70–100 | 🔴 Danger | High-confidence phishing attempt — do not interact |
+
+### Operational intelligence
+
+Optional, content-free OpenTelemetry traces and metrics cover HTTP requests, analysis,
+provider latency/queue outcomes, caches and feed refreshes. No collector or public
+metrics endpoint is required. See [configuration, privacy exclusions and metric catalog](docs/deployment.md#9-operational-intelligence-task-34).
+
+From `backend/`, run `python -m app.jobs.refresh_threat_feeds` for a one-shot,
+sequential refresh of registered feeds. Exit 0 accepts success/not-modified/disabled;
+exit 1 includes partial failures. **No production scheduler or Render Cron resource
+is configured**. The runner does not check per-provider due times: daily refresh
+cannot keep all feeds fresh, while a two-hour refresh-all over-polls slower sources.
+See the [freshness boundaries and scheduling tradeoff](docs/deployment.md#one-shot-feed-runner--scheduling-is-not-deployed);
+source-aware orchestration and cross-process coordination remain separate work.

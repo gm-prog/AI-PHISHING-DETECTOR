@@ -246,15 +246,15 @@ def test_compute_freshness_states():
     # 2. Never synced
     assert compute_freshness(None, None, None, 86400, enabled=True) == "never_synced"
 
-    # 3. Fresh (synced within 1.5x interval)
+    # 3. Fresh (synced within 2x interval)
     fresh_time = (now - timedelta(hours=12)).isoformat()
     assert compute_freshness(fresh_time, now_iso, None, 86400, enabled=True) == "fresh"
 
-    # 4. Stale (synced between 1.5x and 3.0x interval)
-    stale_time = (now - timedelta(hours=48)).isoformat()
+    # 4. Stale (synced strictly above 2x, through 4x interval)
+    stale_time = (now - timedelta(hours=60)).isoformat()
     assert compute_freshness(stale_time, now_iso, None, 86400, enabled=True) == "stale"
 
-    # 5. Expired (synced > 3.0x interval)
+    # 5. Expired (synced > 4x interval)
     expired_time = (now - timedelta(days=5)).isoformat()
     assert compute_freshness(expired_time, now_iso, None, 86400, enabled=True) == "expired"
 
@@ -2012,3 +2012,25 @@ def test_admin_threat_feeds_authorization_and_csrf(client, db_session):
         assert refresh_body["source"] == "openphish"
         assert refresh_body["status"] == "success"
         assert refresh_body["records_inserted"] >= 1
+
+
+@pytest.mark.parametrize("provider,interval", [
+    (PhishTankFeedProvider, 7200), (OpenPhishFeedProvider, 21600), (MISPFeedProvider, 86400),
+])
+@pytest.mark.parametrize("multiple,extra_seconds,expected", [
+    (2, 0, "fresh"), (2, 1, "stale"), (4, 0, "stale"), (4, 1, "expired"),
+])
+def test_provider_freshness_exact_boundaries(monkeypatch, provider, interval, multiple, extra_seconds, expected):
+    """Protect the documented age boundaries, not a nonexistent scheduler policy."""
+    from app.services import threat_feed_service
+    fixed_now = datetime(2026, 10, 9, tzinfo=timezone.utc)
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+    monkeypatch.setattr(threat_feed_service, "datetime", FixedDatetime)
+    assert provider.default_refresh_interval_seconds == interval
+    last_success = (fixed_now - timedelta(seconds=multiple * interval + extra_seconds)).isoformat()
+    assert compute_freshness(last_success, fixed_now.isoformat(), None, interval) == expected
+    # A later error does not make a previously successful generation younger.
+    assert compute_freshness(last_success, fixed_now.isoformat(), "network_error", interval) == expected
