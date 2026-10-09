@@ -186,4 +186,7 @@ metrics endpoint is required. See [configuration, privacy exclusions and metric 
 From `backend/`, run `python -m app.jobs.refresh_threat_feeds` for a one-shot,
 sequential refresh of registered feeds. Exit 0 accepts success/not-modified/disabled;
 exit 1 includes partial failures. **No production scheduler or Render Cron resource
-is configured**; operator scheduling and non-overlap coordination remain separate.
+is configured**. The runner does not check per-provider due times: daily refresh
+cannot keep all feeds fresh, while a two-hour refresh-all over-polls slower sources.
+See the [freshness boundaries and scheduling tradeoff](docs/deployment.md#one-shot-feed-runner--scheduling-is-not-deployed);
+source-aware orchestration and cross-process coordination remain separate work.

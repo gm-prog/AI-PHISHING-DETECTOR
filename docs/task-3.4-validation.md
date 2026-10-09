@@ -3,7 +3,7 @@
 Date: 2026-10-09. Repository: `gm-prog/AI-PHISHING-DETECTOR`.
 Base and verified `origin/main`: `ab173e69b553baf1a38d01ec70b575e9ed951566`.
 Workspace was clean on `arena/3256c875-ai-phishing-detector`; no branch switch,
-reset, force-push, migration, deployment or production database operation.
+reset, force-push, schema change, deployment or production database operation.
 
 ## Local checks
 
@@ -80,3 +80,99 @@ claim all four CI gates are green or the full definition of done is satisfied.
 - Collector/backend configuration, actual telemetry delivery, scheduling, alerting,
   and cross-process refresh coordination remain operator/follow-up work. No Cron
   service has been configured or deployed.
+
+
+## Corrective pass — 2026-10-09
+
+### Verified starting state and preservation
+
+Live PR #4 remained open at `14a1f7d0047971d142644f0b4871ef2072633da4`,
+based on unchanged `main` (`ab173e69b553baf1a38d01ec70b575e9ed951566`).
+The restored workspace initially had HEAD at that main SHA and Task 3.4 files as
+uncommitted changes, with no upstream set on the required Arena branch. Hashing
+**every remote-tracked file** against PR head found no differences or extra files.
+After staging those exact files, `git diff --cached origin/arena/3256c875-ai-phishing-detector
+--exit-code` succeeded and `git merge --ff-only origin/arena/3256c875-ai-phishing-detector`
+fast-forwarded to the live head without changing/discarding file content. No reset,
+stash, clean, rebase, force-push or branch switch was used. No unexplained remote
+commits were overwritten.
+
+### Root cause and correction
+
+The real `_execute_gemini_call()` catches JSON/schema/output extraction failures
+inside its validation boundary and returns a heuristic fallback dictionary.
+Previously `analyze_with_llm()` treated that as provider success without recording
+`invalid_output`. The old mocked-worker ValidationError test bypassed this catch.
+
+The worker now returns a private dict-compatible marker on that existing path.
+Only the awaiting service records `invalid_output`, marks the provider outcome
+`error`, and strips the marker before the existing cache/write/return path. Public
+keys, fallback contents, score floors, verdicts and cache behavior are unchanged.
+No worker-side fallback metric is emitted: if a timeout wins and the worker later
+finishes with invalid output, the attempt remains one `timeout`, not two fallbacks.
+Unconfigured, queue, timeout and provider-error paths keep their categories.
+
+SDK-boundary tests now exercise both Interactions text accessors, direct Generate
+Content, and Generate Content compatibility fallback. Across those four paths,
+successful, malformed-JSON, schema-invalid and empty outputs verify exact counts,
+plain public dictionaries, score floors, provider outcomes, cache replay and privacy.
+An additional synchronized late-worker test protects timeout accounting. The SDK
+is mocked; the actual worker, parser, validation catch and async service execute.
+
+Scheduling guidance no longer recommends daily refresh-all as universally suitable.
+It documents verified 2h/6h/24h source intervals, fresh <=2× / stale <=4× / expired
+>4× boundaries, and the explicit freshness-versus-provider-load tradeoff. Twelve
+frozen-clock boundary cases protect these existing semantics. No scheduler, feed
+implementation, generation logic, locking, database schema or infrastructure changed.
+
+### Fresh verification results
+
+Environment: Python 3.11.2, Node 22.22.3, npm 10.9.8, npm lockfile v3. CI specifies
+Python 3.11 and Node 22; npm has no separate repository version pin. Commands use
+`PYTHONPATH=.` and `../.venv/bin/pytest` from `backend/`.
+
+| Command/check | Exit | Actual result |
+|---|---:|---|
+| Pre-correction full `pytest -q` | 0 | 211 passed, 12 PostgreSQL skips, 3 warnings |
+| New SDK-boundary tests before fix: `pytest -q tests/test_operations.py -k llm` | 1 | **12 failed**, 9 passed, 37 deselected; reproduced missing accounting |
+| Same focused LLM command after fix | 0 | **21 passed**, 37 deselected, 2 warnings |
+| `pytest -q tests/test_security_hardening.py -k 'llm or gemini or prompt or provider_queue'` | 0 | **5 passed**, 40 deselected, 2 warnings |
+| `pytest -q tests/test_operations.py tests/test_threat_feeds.py` | 0 | **99 passed**, 2 warnings; no skips |
+| Full SQLite `pytest -q` | 0 | **239 passed, 12 skipped**, 3 existing warnings |
+| Local PostgreSQL 16.2 migrations + read-only verifier | 0 | Passed on isolated Unix-socket test database |
+| Full PostgreSQL-enabled `pytest -q` | 0 | **251 passed**, 3 existing warnings; no skips |
+| `alembic heads` | 0 | Unchanged `b4a49925f0e5` |
+| Root `.venv/bin/bandit -q -r backend/app` | 0 | No findings |
+| Root `.venv/bin/pip-audit -r backend/requirements.txt` | 0 | No known vulnerabilities |
+| PR #4 frontend `npm audit --audit-level=high` | 1 | Existing `source-map-js@1.2.1` high advisory remains |
+| Separate main-derived candidate: `npm ci`, `npm audit --audit-level=high`, `npm run build` | 0 | Clean install, **0 vulnerabilities**, TypeScript/Vite build passed |
+| `npm run lint`, both unchanged frontend and candidate | 1 | Same **9 errors, 3 warnings**; pre-existing, not enforced in CI, not fixed here |
+| `git diff --check`; dependency patch `git apply --check` | 0 | Passed; dependency change not applied to PR #4 |
+
+PostgreSQL used both `DATABASE_URL` and `SENTINEL_TEST_POSTGRES_URL` set to
+`postgresql://postgres@localhost/sentinel_test?host=/home/user/.cache/sentinel-pg-corrective`.
+This sandbox-only database has no listening TCP port and is not production.
+The preserved four-job GitHub Actions workflow is rerun on the final pushed head;
+exact-head conclusions are recorded in the PR/report, not inferred from earlier runs.
+Secret scanning is verified through the configured Gitleaks CI job.
+
+### Separate frontend security delivery limitation
+
+The advisory was reverified through GitHub's advisory API and npm registry metadata:
+GHSA-68fv-2mgg-jv7q affects >=1.0.0, <1.2.2; first patched version is 1.2.2.
+Both `@tailwindcss/vite -> @tailwindcss/node` and `vite -> postcss` require
+`source-map-js ^1.2.1`, which accepts 1.2.2. The vulnerable lock entry is identical
+to current main, not introduced by Task 3.4.
+
+A main-derived, separate working snapshot was updated with
+`npm update source-map-js --package-lock-only --ignore-scripts`. Only the package's
+version, tarball URL and integrity hash changed; manifest and all other entries
+were verified unchanged. Clean install resolves both chains to **1.2.2**; audit
+and build pass. This is supplied as a standalone patch, **not** mixed into PR #4.
+
+The Arena session permits work/pushes only on the existing Task 3.4 branch. Creating
+or pushing the requested separate security branch/PR is unavailable in this session.
+That deliverable remains **blocked**, requires another session based on verified
+main, and has no commit SHA, PR URL or CI run yet. PR #4's frontend audit therefore
+remains failing until an independently delivered security fix is integrated into
+its test base and checks rerun. No gate has been weakened and no merge is authorized.

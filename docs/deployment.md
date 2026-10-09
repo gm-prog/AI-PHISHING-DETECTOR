@@ -298,6 +298,12 @@ an identifier or arbitrary exception string.
 | `sentinel.feed.records` | `{record}` | `source`, `record.type` | `processed`/`inserted` from refresh results |
 | `sentinel.feed.last_success` | s | `source` | Unix epoch at observed successful completion/304 in this process; not emitted until success |
 
+LLM fallback counters record newly generated fallbacks consumed by the awaiting
+analysis service, once per attempt. Invalid JSON/schema output is `invalid_output`,
+not provider success. Cached fallback replay does not increment this counter.
+A synchronous worker finishing after its caller times out does not add an
+`invalid_output` fallback on top of the already recorded `timeout`.
+
 `input_type`: `url`, `email_text`, `email_header`. `verdict`: `safe`, `warning`,
 `danger`, `error`. Providers: `gemini`, `virustotal`, `urlhaus`, `webrisk`,
 `threat_feed`, `unknown`. Sources: `phishtank`, `openphish`, `misp`, `unknown`.
@@ -332,12 +338,32 @@ a failed rollback aborts rather than reusing a broken session. Per-source and fi
 structured events contain no indicators, URLs or raw exceptions. Shutdown exports
 are best effort and do not turn a successful refresh into a data-plane failure.
 
-A conservative initial operator schedule is **daily at 03:00 UTC**. This is no more
-frequent than the registered refresh intervals (PhishTank 2h, OpenPhish 6h, MISP 24h).
-The refresh-all command does not enforce per-source due times: more frequent scheduling
-would need source-aware due-time orchestration first. Existing locks/semaphores are
-**in-process only**, not distributed locks. Until cross-process exclusion is designed,
-run a single scheduler and avoid overlapping web/manual/job refreshes for a source.
-Approve infrastructure cost, credentials, retention, failure alerts and non-overlap
-policy separately before enabling a scheduler. **No Cron service was added to
-`render.yaml`; a runnable command is not an active production schedule.**
+The refresh-all command attempts **every registered provider on every invocation**
+(disabled providers report `disabled`); it has no per-source due-time policy.
+Current provider defaults and age-based freshness boundaries are:
+
+| Source | Refresh interval | Fresh through | Stale through | Expired after |
+|---|---:|---:|---:|---:|
+| PhishTank | 2h | 4h | 8h | 8h |
+| OpenPhish | 6h | 12h | 24h | 24h |
+| MISP | 24h | 48h | 96h | 96h |
+
+Age is measured since the last successful refresh (including `not_modified`).
+`compute_freshness()` reports fresh at age <= 2× interval, stale at
+2× interval < age <= 4× interval, and expired above 4× interval. Feed-state reporting
+uses the persisted interval when present, otherwise the provider default. Disabled
+sources report `disabled`. Enabled sources without a successful sync report
+`never_synced`, or `failed` when an error exists. A later error does not reset the age of an earlier success.
+
+**There is no universally suitable source-specific cadence in this runner.** A daily
+refresh lets PhishTank expire and OpenPhish become stale; it is not guidance for
+keeping all sources fresh. Running refresh-all every two hours instead attempts
+OpenPhish and MISP more frequently than their configured intervals. Operators must
+explicitly accept that freshness-versus-provider-load tradeoff and verify provider
+limits, or defer automated scheduling until source-aware due-time orchestration is
+implemented and tested. That orchestration is **not** implemented here.
+
+Existing locks/semaphores are **in-process only**, not distributed locks. Any later
+operator-managed scheduling must avoid overlapping web/manual/job refreshes for a
+source and separately approve cost, credentials, retention and failure alerts.
+**No scheduler or Cron service is configured or provisioned in `render.yaml`.**
