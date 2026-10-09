@@ -171,3 +171,173 @@ ADMIN_EMAIL=… ADMIN_PASSWORD=… BASE_URL=… python tests/verify_live.py
 The harness bootstraps CSRF state from `/api/health`, registers throwaway
 users, exercises authenticated analysis/history/IDOR/admin-lock paths, and
 never prints cookies, tokens, passwords, or secrets.
+
+## 9. Operational intelligence (Task 3.4)
+
+### Liveness versus readiness
+
+- `GET /api/health` is cheap **liveness**, HTTP 200 with the unchanged
+  `status`, `api_active`, `version`, and `message` fields. It performs no DB
+  query or external-provider request, even when a session cookie is supplied.
+  CSRF bootstrap cookies and security/CORS middleware remain in place.
+- `GET /api/ready` is public **database connectivity readiness**. A short-lived
+  connection from the existing engine executes `SELECT 1` and closes. HTTP 200:
+  `{"status":"ready","database":"available"}`; HTTP 503:
+  `{"status":"not_ready","database":"unavailable"}`. Driver messages, hostnames
+  and credentials are never returned. No provider checks, schema repair or migrations.
+  This is not a deep schema/permissions/replica-lag check. Configure a bounded
+  PostgreSQL `connect_timeout` in the externally supplied URL; existing engine
+  pool/driver timeout semantics still apply.
+- Render **continues to use `/api/health`**. The `starter` web service,
+  pre-deploy migration and external PostgreSQL contracts are unchanged.
+  Reference: https://render.com/docs/health-checks.
+
+### Optional OpenTelemetry export
+
+`app/telemetry.py` uses the OTel Python API/SDK and explicit ASGI/provider spans,
+not automatic request/header/outbound HTTP/SQL instrumentation. No public scrape
+endpoint exists. With no explicit endpoint configured, no SDK workers or exporters
+are started; scans still work. Operators must supply a collector/backend separately:
+
+```bash
+# Set these externally; do not commit collector addresses or authentication values.
+OTEL_EXPORTER_OTLP_ENDPOINT=https://your-collector.example
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+# Optional credentials: OTEL_EXPORTER_OTLP_HEADERS (operator secret configuration)
+OTEL_TRACES_EXPORTER=otlp
+OTEL_METRICS_EXPORTER=otlp
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=0.1
+```
+
+Supported SDK/HTTP-exporter settings include signal-specific
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `METRICS_ENDPOINT` (full signal URLs),
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS` / `METRICS_HEADERS`, and TLS certificate
+settings supported by the HTTP exporter. The generic endpoint appends `/v1/traces`
+and `/v1/metrics`. A signal without an endpoint is not exported. `none` disables
+that signal; `OTEL_SDK_DISABLED=true` disables both. Only `otlp`/`none` exporters
+and `http/protobuf` are supported here; unsupported configuration fails open with
+sanitized diagnostics, **not** a console exporter. Export destination/TLS validity
+must be checked by the operator; a running API does not prove telemetry delivery.
+
+Service identity is fixed to `sentinel-ai-api` (web) or `sentinel-ai-feed-job`
+(job), plus validated `deployment.environment.name`. Arbitrary `OTEL_RESOURCE_ATTRIBUTES`
+and resource detectors are deliberately not imported. Providers are lifecycle-owned,
+not installed repeatedly into OTel's write-once global registry. Lifespan shutdown
+and one-shot job completion flush/shutdown their own providers. Do not also launch
+this service with automatic instrumentation/provider bootstrap.
+
+Spans use a bounded batch queue (512 spans, batches of 128, 5-second interval).
+Metric export occurs every 60 seconds; HTTP histogram boundaries follow the stable
+HTTP convention (0.005 through 10 seconds). HTTP exporter network timeout is fixed
+at 3 seconds, reader/export budgets at 4 seconds, rather than trusting unbounded
+operator timeout settings. A full queue drops telemetry rather than blocking a scan.
+Exporter failures do not change scan results. SDK/exporter diagnostic records are
+replaced by `event=telemetry_export_failed`, without raw exception or response text.
+No logs exporter, collector, vendor account or Render resource is provisioned.
+
+### Privacy, correlation and spans
+
+Allowed dimensions are finite input type, verdict, provider/source, outcome, error
+category, cache result, feed freshness, HTTP method/scheme, registered route template,
+and bounded HTTP status/status class. Unknown providers/sources collapse to `unknown`;
+unexpected provider outcomes collapse to `error`. Unmatched/rejected-before-routing
+requests use `unmatched`, never their raw path. HTTP method names outside the standard
+finite set become `_OTHER`.
+
+**Excluded:** payloads, raw submitted URLs/domains, email bodies/headers, query strings,
+cookies, Authorization, passwords, API keys, session/user IDs, database URLs,
+exception messages/stacks, provider responses, cache keys and generation IDs.
+Only a validated W3C `traceparent` is accepted for correlation; baggage and tracestate
+are ignored. Generated trace/span IDs appear in structured operational logs, not
+metric dimensions (SDK trace exemplars may link a measurement to a trace).
+Do not attach user data via collector enrichment. Configure infrastructure/access
+logging separately to avoid raw query strings; this module does not sanitize an
+operator's reverse-proxy or Uvicorn access logs.
+
+Spans: `HTTP` renamed to `METHOD route-template`, `analysis`, `analysis.heuristic`,
+`threat_intelligence.local_lookup`, `provider.lookup` (VT/URLhaus/Web Risk),
+`provider.gemini`, `analysis.persistence`, and `threat_feed.refresh`.
+No automatic exception recording. Stable structured events include
+`analysis_completed`, `provider_call_completed`, `llm_fallback`,
+`feed_refresh_completed`, `scan_persistence_failed`, `readiness_failed`,
+`feed_job_started`, `feed_job_source_completed`, `feed_job_completed`,
+`feed_job_failed`, and telemetry initialization/export/shutdown failures.
+Completion events carry bounded outcomes and monotonic `duration_ms` where applicable.
+Scan completion no longer logs user IDs.
+
+References consulted: [OTel Python instrumentation](https://opentelemetry.io/docs/languages/python/instrumentation/),
+[HTTP metrics conventions](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/),
+and [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)
+(official GitHub source mirrors used where direct outbound access is restricted).
+
+### Metric catalog
+
+All `*.duration` and `*.queue_wait` histograms use **seconds**, not milliseconds.
+Counts are monotonic counters; `last_success` is a gauge. No dimension contains
+an identifier or arbitrary exception string.
+
+| Instrument | Unit | Dimensions | Interpretation |
+|---|---|---|---|
+| `http.server.request.duration` | s | `http.request.method`, `url.scheme`, `http.route`, `http.response.status_code`, `status_class`, bounded `error.type` on server errors | Full ASGI request lifetime, including rejection/security middleware |
+| `sentinel.http.requests` | `{request}` | Same as HTTP duration | Completed HTTP requests |
+| `sentinel.analysis.count` | `{analysis}` | `input_type`, `verdict` | Started analysis that reaches completion/error; validation/rate-limit rejection belongs to HTTP metrics |
+| `sentinel.analysis.duration` | s | `input_type`, `verdict` | Analysis function, including heuristics/providers/persistence, excluding auth/rate-limit/serialization |
+| `sentinel.provider.calls` | `{call}` | `provider`, `outcome` | Guarded lookup attempts, including queue exhaustion; outer cache hits do not call a provider |
+| `sentinel.provider.duration` | s | `provider`, `outcome` | Guarded operation including queue wait; Gemini includes cache recheck/write |
+| `sentinel.provider.execution.duration` | s | `provider` | Time holding acquired provider capacity; Gemini includes cache recheck/write, no sample if acquisition failed |
+| `sentinel.provider.queue_wait` | s | `provider` | Time waiting for provider semaphore, including failed acquisition; no private semaphore state |
+| `sentinel.provider.errors` | `{error}` | `provider`, `outcome` | Non-success excluding intentional skipped/disabled/not_modified |
+| `sentinel.provider.exhaustion` | `{error}` | `provider`, `outcome` | `timeout` or `queue_exhausted` subset of errors |
+| `sentinel.llm.fallbacks` | `{fallback}` | `reason` | `unconfigured`, `queue_exhausted`, `timeout`, `provider_error`, `invalid_output` |
+| `sentinel.cache.accesses` | `{access}` | `provider`, `cache.result` | `hit`/`miss` per existing cache access, including Gemini's existing double-checks, not per HTTP request |
+| `sentinel.cache.removals` | `{entry}` | `provider`, `cache.result` | Lazy `expired` removals or capacity `evicted` entries; no cache key |
+| `sentinel.feed.attempts` | `{refresh}` | `source` | Refresh entry, including disabled sources |
+| `sentinel.feed.outcomes` | `{refresh}` | `source`, `outcome`, `error.type`, `freshness` | Normalized existing refresh result or unexpected failure |
+| `sentinel.feed.duration` | s | Same as feed outcomes | Whole refresh, including local lock/queue/fetch/DB phases |
+| `sentinel.feed.records` | `{record}` | `source`, `record.type` | `processed`/`inserted` from refresh results |
+| `sentinel.feed.last_success` | s | `source` | Unix epoch at observed successful completion/304 in this process; not emitted until success |
+
+`input_type`: `url`, `email_text`, `email_header`. `verdict`: `safe`, `warning`,
+`danger`, `error`. Providers: `gemini`, `virustotal`, `urlhaus`, `webrisk`,
+`threat_feed`, `unknown`. Sources: `phishtank`, `openphish`, `misp`, `unknown`.
+Outcomes: `success`, `error`, `failed`, `timeout`, `queue_exhausted`, `skipped`,
+`disabled`, `not_modified`, `rate_limited`, `provider_unavailable`, `cancelled`.
+Error categories reuse the finite feed validation/network/auth/timeout/DB codes
+in `telemetry.ERRORS`; unmapped errors become `unexpected`. Freshness uses the
+existing `fresh`, `stale`, `expired`, `never_synced`, `failed`, `disabled` states.
+Metric data is process-local and resets on restart. Persistent authoritative feed
+freshness/last-success remains in `ThreatFeedState` and the admin feed-state API;
+telemetry adds no tables or polling DB callbacks.
+
+### One-shot feed runner — scheduling is NOT deployed
+
+From `backend/`, with the same externally supplied configuration as the web service:
+
+```bash
+python -m app.jobs.refresh_threat_feeds
+```
+
+The job performs read-only schema verification, opens/closes the existing session
+factory, obtains registered providers, and calls the existing sequential refresh-all
+orchestrator. Bounded fetch, validation, conditional caching, generation activation
+and previous-generation preservation remain unchanged. Manual admin refresh remains
+available with the same auth/CSRF/RBAC/rate limit.
+
+Exit **0** means all source results were `success`, `not_modified`, or intentionally
+`disabled` (e.g. unconfigured MISP). Exit **1** means any material source failure,
+unexpected result, invalid configuration/schema or unreliable overall completion.
+An unexpected source error rolls back the session and permits later sources to run;
+a failed rollback aborts rather than reusing a broken session. Per-source and final
+structured events contain no indicators, URLs or raw exceptions. Shutdown exports
+are best effort and do not turn a successful refresh into a data-plane failure.
+
+A conservative initial operator schedule is **daily at 03:00 UTC**. This is no more
+frequent than the registered refresh intervals (PhishTank 2h, OpenPhish 6h, MISP 24h).
+The refresh-all command does not enforce per-source due times: more frequent scheduling
+would need source-aware due-time orchestration first. Existing locks/semaphores are
+**in-process only**, not distributed locks. Until cross-process exclusion is designed,
+run a single scheduler and avoid overlapping web/manual/job refreshes for a source.
+Approve infrastructure cost, credentials, retention, failure alerts and non-overlap
+policy separately before enabling a scheduler. **No Cron service was added to
+`render.yaml`; a runnable command is not an active production schedule.**
