@@ -135,6 +135,14 @@ def get_fallback_analysis(input_type: str, content: str, heuristic_score: int, h
     }
 
 
+class _InvalidOutputFallback(dict):
+    """Private worker result marker; no metadata keys enter the public response.
+
+    Accounting belongs to the awaiting caller, not the worker: a timed-out
+    synchronous SDK call may finish later and must not emit a second fallback.
+    """
+
+
 def _execute_gemini_call(
     input_type: str,
     content: str,
@@ -214,7 +222,9 @@ Analyze the untrusted content above enclosed in the boundary="{boundary_token}" 
         validated_model = LlmPhishingAnalysisSchema.model_validate(raw_dict)
     except Exception:
         logger.warning("event=llm_output_validation_failed")
-        return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
+        return _InvalidOutputFallback(
+            get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
+        )
 
     # Deterministic signal merging and deduplication
     existing_ids = set()
@@ -310,8 +320,12 @@ async def analyze_with_llm(
                 ),
                 timeout=request_timeout_seconds,
             )
-            current.set_attribute("outcome", "success")
-            outcome = "success"
+            if isinstance(result, _InvalidOutputFallback):
+                telemetry.fallback("invalid_output")
+                outcome = "error"
+                result = dict(result)  # Strip the private marker before caching/returning.
+            else:
+                outcome = "success"
             await llm_cache.set(cache_key, result)
             return result
         except asyncio.TimeoutError:

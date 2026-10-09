@@ -1,6 +1,8 @@
 """Operational regression tests: isolated SQLite, in-memory sinks, no provider network."""
 import asyncio
 import logging
+import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -242,23 +244,28 @@ async def test_provider_guard_outcomes_and_sanitization(sinks, outcome, caplog):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["unconfigured", "queue_exhausted", "timeout", "provider_error", "invalid_output"])
+@pytest.mark.parametrize("reason", ["unconfigured", "queue_exhausted", "timeout", "provider_error"])
 async def test_llm_fallback_categories(sinks, monkeypatch, reason):
     _, reader = sinks
     guard.llm_cache.clear()
     monkeypatch.setattr(llm, "llm_semaphore", asyncio.Semaphore(0 if reason == "queue_exhausted" else 1))
-    def execute(*args):
+    def create_client(**kwargs):
         if reason == "timeout":
             raise TimeoutError(SECRET)
-        if reason == "invalid_output":
-            return llm.LlmPhishingAnalysisSchema.model_validate({})
         raise RuntimeError(SECRET)
-    monkeypatch.setattr(llm, "_execute_gemini_call", execute)
+    client_factory = MagicMock(side_effect=create_client)
+    monkeypatch.setattr(llm.genai, "Client", client_factory)
     result = await llm.analyze_with_llm("email_text", SECRET, "" if reason == "unconfigured" else SECRET,
                                      70, [], acquire_timeout_seconds=.001)
     assert result["risk_score"] == 70
     assert result["status"] == "danger"
-    assert points(reader, "sentinel.llm.fallbacks")[0].attributes["reason"] == reason
+    counts = points(reader, "sentinel.llm.fallbacks")
+    assert [(dict(p.attributes), p.value) for p in counts] == [({"reason": reason}, 1)]
+    assert set(result) == {"risk_score", "status", "phishing_signals", "ai_explanation"}
+    if reason in {"unconfigured", "queue_exhausted"}:
+        client_factory.assert_not_called()
+    else:
+        client_factory.assert_called_once()
 
 
 class FakeFeed:
@@ -435,3 +442,92 @@ def test_cli_configuration_error_is_sanitized():
     assert result.returncode == 1
     assert SECRET not in result.stdout + result.stderr
     assert "feed_job_failed" in result.stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["interactions_output_text", "interactions_text", "generate", "compatibility"])
+@pytest.mark.parametrize("output", ["valid", "malformed_json", "invalid_schema", "empty"])
+async def test_llm_real_output_boundary_counts_once(sinks, monkeypatch, caplog, api, output):
+    """Exercise the real worker's extraction, parsing and caught validation failures."""
+    exporter, reader = sinks
+    monkeypatch.setattr(llm, "llm_cache", guard.TTLCache(provider="gemini"))
+    monkeypatch.setattr(llm, "llm_semaphore", asyncio.Semaphore(1))
+    payloads = {
+        "valid": json.dumps({"risk_score": 10, "status": "safe", "phishing_signals": [],
+                             "ai_explanation": "Validated response."}),
+        "malformed_json": "{bad json " + SECRET,
+        "invalid_schema": json.dumps({"risk_score": 101, "status": SECRET}),
+        "empty": "",
+    }
+    response = SimpleNamespace(text=payloads[output])
+    generate = MagicMock(return_value=response)
+    sdk = SimpleNamespace(models=SimpleNamespace(generate_content=generate))
+    interaction = MagicMock(return_value=SimpleNamespace(**{
+        "output_text" if api == "interactions_output_text" else "text": payloads[output]}))
+    if api != "generate":
+        sdk.interactions = SimpleNamespace(create=interaction)
+    if api == "compatibility":
+        interaction.side_effect = RuntimeError(SECRET)
+    client_factory = MagicMock(return_value=sdk)
+    monkeypatch.setattr(llm.genai, "Client", client_factory)
+    signals = [{"id": "heuristic", "severity": "high", "title": "Test", "description": "Test"}]
+    with caplog.at_level(logging.INFO):
+        result = await llm.analyze_with_llm("email_text", SECRET, SECRET, 70, signals)
+        # Invalid-output results already use the cache; preserve it without recounting.
+        repeated = await llm.analyze_with_llm("email_text", SECRET, SECRET, 70, signals)
+    client_factory.assert_called_once()
+    assert repeated == result
+    assert type(result) is dict
+    assert set(result) == {"risk_score", "status", "phishing_signals", "ai_explanation"}
+    assert result["risk_score"] == 70  # Preserve server-side floor and verdict.
+    assert result["status"] == "danger"
+    assert result["phishing_signals"] == signals
+    if output == "valid":
+        assert result["ai_explanation"] == "Validated response."
+    else:
+        assert result == llm.get_fallback_analysis("email_text", SECRET, 70, signals)
+    counts = points(reader, "sentinel.llm.fallbacks")
+    assert [(dict(p.attributes), p.value) for p in counts] == (
+        [] if output == "valid" else [({"reason": "invalid_output"}, 1)])
+    calls = points(reader, "sentinel.provider.calls")
+    assert [(p.attributes["outcome"], p.value) for p in calls] == [
+        ("success" if output == "valid" else "error", 1)]
+    assert SECRET not in caplog.text
+    assert SECRET not in str([(s.attributes, s.events) for s in spans(exporter)])
+    if api in {"generate", "compatibility"}:
+        generate.assert_called_once()
+    else:
+        generate.assert_not_called()
+        assert interaction.call_args.kwargs["store"] is False
+
+
+@pytest.mark.asyncio
+async def test_llm_late_invalid_output_after_timeout_is_not_counted_twice(sinks, monkeypatch):
+    """A timed-out synchronous SDK worker can finish later; only its caller accounts."""
+    import threading
+    _, reader = sinks
+    release = threading.Event()
+    completed = threading.Event()
+    original_fallback = llm.get_fallback_analysis
+    def observe_fallback(*args):
+        result = original_fallback(*args)
+        if threading.current_thread() is not threading.main_thread():
+            completed.set()
+        return result
+    def create(**kwargs):
+        assert release.wait(timeout=5), "test did not release SDK worker"
+        return SimpleNamespace(output_text="{bad json " + SECRET)
+    monkeypatch.setattr(llm, "llm_cache", guard.TTLCache(provider="gemini"))
+    monkeypatch.setattr(llm, "llm_semaphore", asyncio.Semaphore(1))
+    monkeypatch.setattr(llm, "get_fallback_analysis", observe_fallback)
+    monkeypatch.setattr(llm.genai, "Client", lambda **kwargs:
+                        SimpleNamespace(interactions=SimpleNamespace(create=create)))
+    try:
+        result = await llm.analyze_with_llm("email_text", SECRET, SECRET, 70, [],
+                                          request_timeout_seconds=.02)
+    finally:
+        release.set()
+    assert await asyncio.to_thread(completed.wait, 5), "real worker validation did not execute"
+    assert result["risk_score"] == 70
+    assert [(dict(p.attributes), p.value) for p in points(reader, "sentinel.llm.fallbacks")] == [
+        ({"reason": "timeout"}, 1)]
