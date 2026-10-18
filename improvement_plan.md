@@ -42,11 +42,13 @@
 - [x] Authoritative Alembic database migrations (`alembic upgrade head`, `alembic downgrade base`), legacy constraint replacement (`uq_source_gen_type_indicator`), `generation_id` NOT NULL enforcement, fail-closed unsafe downgrade refusal on cross-generation duplicates, bounded BZ2 decompression with EOF & trailing data rejection, and non-mutating startup validation.
 - [x] Admin threat feed control plane (`GET /api/admin/threat-feeds`, `POST /api/admin/threat-feeds/{source}/refresh`) with CSRF, rate-limiting, and strict source allowlisting.
 - [x] Production persistence & deployment contract (Task 3.3): fail-closed `DATABASE_URL` validation, legacy `postgres://` normalization pinned to psycopg2, dialect-aware engine pooling, SQLAlchemy-inspection read-only schema verification portable across SQLite/PostgreSQL, PostgreSQL-portable Alembic migrations, real `postgres:16-alpine` CI integration, Render pre-deploy migration + dynamic `$PORT` contract, and a cookie/CSRF-native live verification harness (`docs/deployment.md`).
-- [ ] Automated scheduled background cron/worker feed crawler sync.
+- [ ] Automated scheduled background cron/worker feed crawler sync. Task 3.4 supplies the one-shot command only; scheduling, infrastructure approval and cross-process non-overlap remain pending.
 
 ### Phase 2: Platform Observability & Telemetry
-- [ ] Granular metrics collection for provider latency, cache hit ratios, and queue saturation.
-- [ ] OpenTelemetry distributed tracing across external provider boundaries.
+- [x] Task 3.4 foundation: optional OTel provider latency, queue-wait/exhaustion, cache, HTTP, analysis and feed metrics with bounded dimensions.
+- [x] Explicit sanitized OTel request/analysis/provider/feed spans, optional OTLP HTTP export and privacy regression tests.
+- [x] Separate cheap liveness and DB connectivity readiness; tested one-shot feed-refresh runner.
+- [ ] Operator-configured collector/backend, alert policies and telemetry delivery validation.
 
 ### Phase 3: Frontend Evolution
 - [ ] Modular state management for historical telemetry and dashboard reporting.
