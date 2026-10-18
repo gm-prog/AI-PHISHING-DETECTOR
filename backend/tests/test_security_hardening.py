@@ -1698,6 +1698,68 @@ def test_analysis_defaults_to_local_only_and_never_calls_external_providers(clie
     assert calls == {"vt": 0, "urlhaus": 0, "webrisk": 0, "llm": 0}
 
 
+
+def test_analysis_disclosure_lists_only_eligible_configured_providers(client, monkeypatch):
+    """Consent disclosure lists eligible integrations without making real provider requests."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "configured-test-key")
+    monkeypatch.setattr(settings, "VIRUSTOTAL_API_KEY", "configured-test-key")
+    monkeypatch.setattr(settings, "GOOGLE_WEB_RISK_API_KEY", "")
+
+    async def fake_vt(url, api_key):
+        return {"status": "success", "url": url, "malicious_count": 0, "suspicious_count": 0, "reputation_score": 100, "vendors": []}
+
+    async def fake_urlhaus(url):
+        return {"status": "success", "url": url, "in_database": False, "threat_type": None, "date_added": "", "malware_families": []}
+
+    async def fake_llm(**kwargs):
+        return {"risk_score": kwargs["heuristic_score"], "status": "safe", "phishing_signals": kwargs["heuristic_signals"], "ai_explanation": "Mocked provider report."}
+
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", fake_vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", fake_urlhaus)
+    monkeypatch.setattr("app.main.analyze_with_llm", fake_llm)
+    response = client.post(
+        "/api/analyze",
+        json={
+            "input_type": "url",
+            "content": "https://privacy-disclosure.example/login",
+            "allow_external_processing": True,
+        },
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+    explanation = response.json()["ai_explanation"]
+    assert "Google Gemini" in explanation
+    assert "URLhaus" in explanation
+    assert "VirusTotal" in explanation
+    assert "Google Web Risk" not in explanation
+    assert "Eligible configured integrations" in explanation
+    assert "does not assert that every listed provider received a request" in explanation
+    assert "sanitized preview" in explanation
+    assert "administrator threat-feed refreshes" in explanation
+    assert "\\n\\n---\\n\\n" not in explanation
+
+
+
+def test_external_consent_without_eligible_provider_is_disclosed_truthfully(client, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    response = client.post(
+        "/api/analyze",
+        json={
+            "input_type": "email_text",
+            "content": "Please review this routine account notice.",
+            "allow_external_processing": True,
+        },
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+    explanation = response.json()["ai_explanation"]
+    assert "no eligible third-party provider is configured" in explanation
+    assert "used local analysis only" in explanation
+
 def test_explicit_external_processing_consent_invokes_configured_providers(client, monkeypatch):
     """Explicit opt-in allows configured URL intelligence and Gemini providers to run."""
     calls = {"vt": 0, "urlhaus": 0, "webrisk": 0, "llm": 0}
