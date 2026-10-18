@@ -544,7 +544,7 @@ def test_llm_input_is_bounded_before_provider_call(client, monkeypatch):
     oversized = "https://example.com/" + ("A" * (settings.LLM_MAX_INPUT_CHARS + 100))
     res = client.post(
         "/api/analyze",
-        json={"input_type": "url", "content": oversized},
+        json={"input_type": "url", "content": oversized, "allow_external_processing": True},
         headers=csrf_headers(client),
     )
     assert res.status_code == 200
@@ -684,6 +684,7 @@ def test_analysis_rate_limit_blocks_before_expensive_provider_work(client, monke
                 json={
                     "input_type": "url",
                     "content": f"https://provider-order-{i}.example/login",
+                    "allow_external_processing": True,
                 },
                 headers=headers,
             )
@@ -733,6 +734,7 @@ def test_analysis_daily_quota_enforces_one_hundred_requests_and_survives_guest_r
                 json={
                     "input_type": "email_text",
                     "content": f"Routine security review message {i}.",
+                    "allow_external_processing": True,
                 },
                 headers=headers,
             )
@@ -746,6 +748,7 @@ def test_analysis_daily_quota_enforces_one_hundred_requests_and_survives_guest_r
         json={
             "input_type": "email_text",
             "content": "This request must be blocked by the daily quota.",
+            "allow_external_processing": True,
         },
         headers=headers,
     )
@@ -1360,7 +1363,7 @@ def test_provider_error_sanitization_masks_credentials_and_hostnames(client, mon
 
     res = client.post(
         "/api/analyze",
-        json={"input_type": "url", "content": "https://example.com/test"},
+        json={"input_type": "url", "content": "https://example.com/test", "allow_external_processing": True},
         headers=headers,
     )
     assert res.status_code == 200
