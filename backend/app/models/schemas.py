@@ -50,6 +50,10 @@ class AnalysisRequest(BaseModel):
         ..., min_length=1, max_length=50000,
         description="The content to analyze (URL string, email body, or raw email headers)"
     )
+    external_analysis: bool = Field(
+        default=False,
+        description="Explicit per-scan consent to allow configured third-party analysis providers; disabled by default"
+    )
 
     @field_validator("content")
     @classmethod
@@ -72,6 +76,10 @@ class AnalysisResponse(BaseModel):
     phishing_signals: List[PhishingSignal] = Field(default=[], description="List of suspicious features or signals")
     ai_explanation: str = Field(..., description="Detailed narrative breakdown")
     details: Dict[str, Any] = Field(default={}, description="Technical metadata")
+    external_analysis_enabled: Optional[bool] = Field(
+        None,
+        description="Whether third-party analysis was explicitly enabled for this scan; None for legacy records without recorded mode"
+    )
 
     virustotal_findings: Optional[Dict[str, Any]] = Field(None)
     vt_status: Optional[str] = Field(None)

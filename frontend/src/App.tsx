@@ -215,6 +215,16 @@ export default function App() {
                   transition={{ duration: 0.25 }}
                   className="space-y-5"
                 >
+                  <div className="rounded border border-white/10 bg-[#090D16] px-3 py-2 text-[11px] font-mono">
+                    {activeResponse.external_analysis_enabled === false ? (
+                      <span className="text-[#00E699]">LOCAL-ONLY PROVIDER MODE — no third-party analysis for this scan</span>
+                    ) : activeResponse.external_analysis_enabled === true ? (
+                      <span className="text-[#FFB800]">EXTERNAL ANALYSIS ENABLED — submitted input may be sent to eligible configured providers</span>
+                    ) : (
+                      <span className="text-slate-400">PRIVACY MODE NOT RECORDED — this historical scan predates explicit consent tracking</span>
+                    )}
+                  </div>
+
                   {/* Gauge & Radar Grid */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                     <RiskGauge score={activeResponse.risk_score} status={activeResponse.status} />

@@ -544,7 +544,7 @@ def test_llm_input_is_bounded_before_provider_call(client, monkeypatch):
     oversized = "https://example.com/" + ("A" * (settings.LLM_MAX_INPUT_CHARS + 100))
     res = client.post(
         "/api/analyze",
-        json={"input_type": "url", "content": oversized},
+        json={"input_type": "url", "content": oversized, "external_analysis": True},
         headers=csrf_headers(client),
     )
     assert res.status_code == 200
@@ -684,6 +684,7 @@ def test_analysis_rate_limit_blocks_before_expensive_provider_work(client, monke
                 json={
                     "input_type": "url",
                     "content": f"https://provider-order-{i}.example/login",
+                    "external_analysis": True,
                 },
                 headers=headers,
             )
@@ -733,6 +734,7 @@ def test_analysis_daily_quota_enforces_one_hundred_requests_and_survives_guest_r
                 json={
                     "input_type": "email_text",
                     "content": f"Routine security review message {i}.",
+                    "external_analysis": True,
                 },
                 headers=headers,
             )
@@ -1360,7 +1362,7 @@ def test_provider_error_sanitization_masks_credentials_and_hostnames(client, mon
 
     res = client.post(
         "/api/analyze",
-        json={"input_type": "url", "content": "https://example.com/test"},
+        json={"input_type": "url", "content": "https://example.com/test", "external_analysis": True},
         headers=headers,
     )
     assert res.status_code == 200
@@ -1373,6 +1375,135 @@ def test_provider_error_sanitization_masks_credentials_and_hostnames(client, mon
     assert "internal-vault.corp.local" not in response_text
     assert "secret_pass_8888" not in response_text
     assert "internal-urlhaus-proxy.corp.local" not in response_text
+
+
+
+
+@pytest.mark.parametrize(
+    "input_type,content,consent",
+    [
+        ("url", "https://privacy-local-only.example/login", False),
+        ("email_text", "Please review this routine account notification.", False),
+        ("email_header", "From: alerts@example.test\\nSubject: Account notice\\n", False),
+        # Omitting consent from an older/direct API client must fail closed too.
+        ("url", "https://privacy-default.example/login", None),
+        ("email_text", "Your invoice is ready for review.", None),
+        ("email_header", "From: billing@example.test\\nSubject: Invoice\\n", None),
+    ],
+)
+def test_local_only_analysis_never_reads_provider_caches_or_calls_external_providers(
+    client, monkeypatch, input_type, content, consent
+):
+    from app.config import settings
+    from app.main import llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "configured-test-key")
+    monkeypatch.setattr(settings, "VIRUSTOTAL_API_KEY", "configured-test-key")
+    monkeypatch.setattr(settings, "GOOGLE_WEB_RISK_API_KEY", "configured-test-key")
+
+    async def unexpected_provider_call(*args, **kwargs):
+        raise AssertionError("An external provider function was called without per-scan consent.")
+
+    async def unexpected_cache_read(*args, **kwargs):
+        raise AssertionError("Local-only mode must not read provider-result caches.")
+
+    monkeypatch.setattr("app.main.analyze_with_llm", unexpected_provider_call)
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", unexpected_provider_call)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", unexpected_provider_call)
+    monkeypatch.setattr("app.main.check_url_with_webrisk", unexpected_provider_call)
+    for cache in (llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache):
+        monkeypatch.setattr(cache, "get", unexpected_cache_read)
+
+    request_body = {"input_type": input_type, "content": content}
+    if consent is not None:
+        request_body["external_analysis"] = consent
+
+    client.get("/api/health")
+    response = client.post(
+        "/api/analyze",
+        json=request_body,
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["external_analysis_enabled"] is False
+    assert payload["details"]["external_analysis_enabled"] is False
+    assert "Local-only provider mode" in payload["ai_explanation"]
+    assert "did not send the submitted input to those providers" in payload["ai_explanation"]
+
+
+def test_explicit_external_analysis_consent_enables_configured_provider_paths(client, monkeypatch):
+    from app.config import settings
+    from app.main import llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "configured-test-key")
+    monkeypatch.setattr(settings, "VIRUSTOTAL_API_KEY", "configured-test-key")
+    monkeypatch.setattr(settings, "GOOGLE_WEB_RISK_API_KEY", "configured-test-key")
+    called = []
+
+    async def cache_miss(*args, **kwargs):
+        return None
+
+    async def cache_noop(*args, **kwargs):
+        return None
+
+    for cache in (llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache):
+        monkeypatch.setattr(cache, "get", cache_miss)
+        monkeypatch.setattr(cache, "set", cache_noop)
+
+    async def fake_vt(url, api_key):
+        called.append("VirusTotal")
+        return {
+            "status": "success", "url": url, "malicious_count": 0,
+            "suspicious_count": 0, "reputation_score": 100, "vendors": [],
+        }
+
+    async def fake_urlhaus(url):
+        called.append("URLhaus")
+        return {
+            "status": "success", "url": url, "in_database": False,
+            "threat_type": None, "date_added": "", "malware_families": [],
+        }
+
+    async def fake_webrisk(url, api_key):
+        called.append("Google Web Risk")
+        return {
+            "status": "success", "url": url, "in_database": False, "threat_types": [],
+        }
+
+    async def fake_llm(input_type, content, api_key, heuristic_score, heuristic_signals):
+        called.append("Google Gemini")
+        return {
+            "risk_score": heuristic_score,
+            "status": "safe" if heuristic_score < 30 else "warning" if heuristic_score < 70 else "danger",
+            "phishing_signals": heuristic_signals,
+            "ai_explanation": "Mocked external AI report.",
+        }
+
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", fake_vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", fake_urlhaus)
+    monkeypatch.setattr("app.main.check_url_with_webrisk", fake_webrisk)
+    monkeypatch.setattr("app.main.analyze_with_llm", fake_llm)
+
+    client.get("/api/health")
+    response = client.post(
+        "/api/analyze",
+        json={
+            "input_type": "url",
+            "content": f"https://explicit-consent-{uuid.uuid4().hex}.example/login",
+            "external_analysis": True,
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["external_analysis_enabled"] is True
+    assert payload["details"]["external_analysis_enabled"] is True
+    assert set(called) == {"VirusTotal", "URLhaus", "Google Web Risk", "Google Gemini"}
+    assert "External analysis was explicitly enabled for this scan" in payload["ai_explanation"]
+    assert all(provider in payload["ai_explanation"] for provider in called)
 
 
 def test_prompt_injection_resilience_and_delimitation(monkeypatch):

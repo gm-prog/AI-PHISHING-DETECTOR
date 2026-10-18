@@ -9,8 +9,9 @@ An advanced full-stack AI-powered phishing detector that inspects URLs, email bo
 - **URL Analysis** — Detects typosquatting, brand-jacking, suspicious TLDs, IP-based hosting, excessive subdomains, and insecure protocols
 - **Email Text Analysis** — Identifies urgency keywords, social engineering tactics, and embedded malicious links
 - **Email Header Analysis** — Validates SPF/DKIM/DMARC authentication and detects From/Return-Path sender spoofing
-- **AI Threat Reports** — Generates a rich Markdown intelligence report using a local heuristic engine (works 100% offline)
-- **Gemini AI Mode** — Optional integration with Google Gemini 2.5 Flash for deep semantic phishing analysis
+- **AI Threat Reports** — Generates Markdown reports from local heuristics without third-party analysis when per-scan consent is off
+- **Explicit per-scan privacy control** — third-party providers are disabled by default; the user must opt in for each scan
+- **Gemini AI Mode** — Optional third-party semantic analysis through Google Gemini when configured and explicitly enabled for a scan
 - **Scan History** — Persists up to 30 previous scans in local browser storage
 - **Cinematic UI** — Dark glassmorphism design with animated scanning overlays and live risk gauges
 
@@ -115,12 +116,14 @@ PostgreSQL provisioning, live verification).
 
 ## 🔑 Gemini AI & Threat Intelligence Setup (Optional)
 
-The detector works fully offline with its autonomous heuristic engine. To enable server-side AI-powered semantic threat analysis and external threat feeds:
+The scan pipeline defaults to local-only provider handling. The browser still sends input to the SENTINEL backend, which runs the analysis and applies the existing history-retention behavior. Third-party analysis of a particular scan is disabled unless the user explicitly opts in. Local threat-indicator lookups may use data synchronized earlier; this is not the same as an outbound provider request during the scan.
+
+To allow opted-in scans to use configured AI and external URL intelligence:
 
 1. **Google Gemini AI**: Get an API key from [Google AI Studio](https://aistudio.google.com/) and set `GEMINI_API_KEY=your_key_here` in `backend/.env`.
 2. **Google Web Risk**: Get an API key from [Google Cloud Console](https://console.cloud.google.com/) (Web Risk API) and set `GOOGLE_WEB_RISK_API_KEY=your_key_here` in `backend/.env`.
 3. **VirusTotal**: Set `VIRUSTOTAL_API_KEY=your_key_here` in `backend/.env`.
-4. **URLhaus**: No API key required; automated bounded lookups are enabled by default for URL analysis.
+4. **URLhaus**: No API key required; a URLhaus lookup is eligible only when the user explicitly enables third-party analysis for that URL scan.
 5. **PhishTank Feed**: (Implemented connector) Set `PHISHTANK_API_KEY=your_key_here` in `backend/.env` (optional; feed works without key or with application key).
 6. **OpenPhish Feed**: (Implemented connector) Enabled by default via community feed (`https://openphish.com/feed.txt`).
 7. **MISP Threat Sharing**: (Configurable adapter) Set `MISP_SERVER_URL=https://misp.your-org.local` and `MISP_API_KEY=your_key_here` in `backend/.env` (disabled if unconfigured).
@@ -154,7 +157,7 @@ All keys are server-side only and never leaked to frontend clients or persisted 
 curl -X POST http://localhost:8000/api/analyze \
   -H "Content-Type: application/json" \
   -H "X-CSRF-Token: <token>" \
-  -d '{"input_type": "url", "content": "http://paypa1-verification.xyz/login"}'
+  -d '{"input_type": "url", "content": "http://paypa1-verification.xyz/login", "external_analysis": false}'
 ```
 
 ---

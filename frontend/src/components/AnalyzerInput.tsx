@@ -1,9 +1,9 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Globe, FileText, Code2, CornerDownRight, RotateCcw, Zap } from "lucide-react";
 import { MOCK_SAMPLES } from "../mockData";
 
 interface AnalyzerInputProps {
-  onAnalyze: (type: "url" | "email_text" | "email_header", content: string) => void;
+  onAnalyze: (type: "url" | "email_text" | "email_header", content: string, externalAnalysisEnabled: boolean) => void;
   isLoading: boolean;
 }
 
@@ -11,6 +11,11 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
   const [activeTab, setActiveTab] = useState<"url" | "email_text" | "email_header">("url");
   const [content, setContent] = useState("");
   const [validationError, setValidationError] = useState("");
+  const [externalAnalysisEnabled, setExternalAnalysisEnabled] = useState(false);
+
+  useEffect(() => {
+    if (!isLoading) setExternalAnalysisEnabled(false);
+  }, [isLoading]);
 
   const tabOptions = [
     { id: "url", name: "URL Vector", icon: Globe, placeholder: "https://secure-paypa1-update.xyz/login", max: 2048 },
@@ -50,7 +55,7 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
       }
     }
 
-    onAnalyze(activeTab, trimmedContent);
+    onAnalyze(activeTab, trimmedContent, externalAnalysisEnabled);
   };
 
   const activeSamples = MOCK_SAMPLES.filter((s) => s.type === activeTab);
@@ -123,6 +128,28 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
               )}
             </span>
             <span className="text-slate-500 uppercase tracking-wider">Zero-Trust Analysis Pipeline</span>
+          </div>
+
+          <div className="mt-3 rounded border border-white/10 bg-[#090D16] p-3">
+            <label htmlFor="external-analysis-consent" className="flex items-start gap-2 text-xs text-slate-200 cursor-pointer">
+              <input
+                id="external-analysis-consent"
+                type="checkbox"
+                checked={externalAnalysisEnabled}
+                onChange={(e) => setExternalAnalysisEnabled(e.target.checked)}
+                disabled={isLoading}
+                className="mt-0.5 accent-[#00F0FF]"
+              />
+              <span>
+                <span className="block font-bold">Allow third-party analysis for this scan (optional)</span>
+                <span className="block mt-1 text-slate-400 leading-relaxed">
+                  Unchecked by default. If enabled, URL scans may be sent to URLhaus and configured VirusTotal / Google Web Risk providers; configured Google Gemini may receive a URL, email text, or headers.
+                </span>
+              </span>
+            </label>
+            <p className="mt-2 pl-5 text-[10px] text-slate-500 leading-relaxed">
+              The input is always processed by the SENTINEL backend. Scan results and a sanitized preview may be stored in history; this choice controls third-party analysis during this scan only.
+            </p>
           </div>
 
           {validationError && (

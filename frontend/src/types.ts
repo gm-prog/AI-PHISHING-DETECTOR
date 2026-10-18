@@ -22,6 +22,7 @@ export interface PhishingSignal {
 export interface AnalysisRequest {
   input_type: "url" | "email_text" | "email_header";
   content: string;
+  external_analysis: boolean;
 }
 
 export interface VirusTotalData {
@@ -53,6 +54,8 @@ export interface AnalysisResponse {
   status: "safe" | "warning" | "danger";
   phishing_signals: PhishingSignal[];
   ai_explanation: string;
+  /** Undefined/null for historical records created before privacy mode was recorded. */
+  external_analysis_enabled?: boolean | null;
   details: {
     domain?: string;
     suffix?: string;

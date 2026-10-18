@@ -11,6 +11,12 @@
 
 ---
 
+## Per-scan third-party analysis consent
+
+`POST /api/analyze` accepts an `external_analysis` boolean that defaults to `false`. With consent off, the analysis route skips the Gemini, VirusTotal, URLhaus, and Google Web Risk provider paths, including their provider-result caches. URL indicators already stored in SENTINEL's local database may still be used. When consent is true, only providers eligible for the requested input type and available configuration are considered; cache hits can avoid network requests. The response and saved scan metadata record the selected mode. Historical records created before this field existed are marked as mode unknown rather than being retroactively described as local-only.
+
+This setting applies to third-party analysis during that scan. Requests still pass through the SENTINEL backend and existing history storage rules; separate administrator-initiated feed refreshes are outside this per-scan consent control.
+
 ## Endpoint Inventory Matrix
 
 | HTTP Method | Route Path | Access Control | Resource Isolation | Input Sources | Sensitive Outputs | Rate Limit | Risk Level |

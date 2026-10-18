@@ -45,7 +45,11 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
     fetchHistory();
   }, [isAuthenticated, setHistory]);
 
-  const handleAnalyze = async (type: "url" | "email_text" | "email_header", content: string) => {
+  const handleAnalyze = async (
+    type: "url" | "email_text" | "email_header",
+    content: string,
+    externalAnalysisEnabled: boolean
+  ) => {
     setIsLoading(true);
     setError(null);
     setActiveResponse(null);
@@ -67,7 +71,8 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           input_type: type,
-          content: content
+          content: content,
+          external_analysis: externalAnalysisEnabled
         })
       });
 
