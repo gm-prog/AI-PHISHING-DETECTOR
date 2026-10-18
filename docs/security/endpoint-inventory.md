@@ -15,7 +15,8 @@
 
 | HTTP Method | Route Path | Access Control | Resource Isolation | Input Sources | Sensitive Outputs | Rate Limit | Risk Level |
 |---|---|---|---|---|---|---|---|
-| `GET` | `/api/health` | Public | None | None | Minimal health telemetry (status, timestamp, version) | Baseline | Low |
+| `GET` | `/api/health` | Public | None | None | Cheap liveness fields and CSRF bootstrap; no DB/provider query | Baseline | Low |
+| `GET` | `/api/ready` | Public | None | None | DB connectivity only: 200 ready/available or 503 sanitized unavailable | Standard | Low |
 | `POST` | `/api/auth/register` | Public | None | JSON Body (`UserCreate`) | User profile, HttpOnly session cookie, CSRF cookie | 5 / min | High |
 | `POST` | `/api/auth/login` | Public | None | JSON Body (`UserLogin`) | User profile, HttpOnly session cookie, CSRF cookie | 5 / min | High |
 | `POST` | `/api/auth/logout` | Public / Auth | Current Session | Cookie `sentinel_session` | None (clears session and auth cookies) | Standard | Low |
@@ -29,3 +30,14 @@
 | `GET` | `/api/history/{scan_id}` | Authenticated | Strict IDOR check (`scan.user_id == current_user.id` or admin) | Path Param `scan_id`, Cookie | Single scan threat report | Standard | Medium |
 | `DELETE` | `/api/history/{scan_id}` | Authenticated | Strict IDOR check (`scan.user_id == current_user.id`) | Path Param `scan_id`, Cookie | Deletion status confirmation | Standard | Medium |
 | `DELETE` | `/api/history` | Authenticated / Guest | User / Guest Scoped | Cookie `sentinel_session` / `sentinel_guest` | Bulk deletion count | Standard | Medium |
+
+
+## Per-scan third-party analysis consent
+
+`POST /api/analyze` accepts `allow_external_processing`, defaulting to `false`. With consent off, VirusTotal, URLhaus, Google Web Risk, and Gemini provider calls are skipped; local heuristics and locally stored threat indicators remain available. With consent on, only applicable configured providers are considered. The response and stored `details.external_processing_allowed` record the chosen mode; older records without that field remain unknown.
+
+This control applies to third-party analysis calls for the current scan. Input still reaches the SENTINEL backend and scan history retains its sanitized preview under existing retention rules. Separate administrator-initiated threat-feed refreshes are outside this per-scan consent setting.
+
+## Operational telemetry
+
+OpenTelemetry export is optional and outbound-only. The API exposes no public metrics scrape endpoint; telemetry dimensions are finite and content-free, and health/readiness probes retain normal security headers. See [deployment telemetry and privacy controls](../deployment.md#9-operational-intelligence-task-34).

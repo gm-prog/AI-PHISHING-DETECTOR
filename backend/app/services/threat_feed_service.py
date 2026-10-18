@@ -17,6 +17,7 @@ from typing import Dict, Any, List, Optional, Protocol, Tuple, runtime_checkable
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 import aiohttp
 from sqlalchemy.orm import Session
+from app import telemetry
 from sqlalchemy import select, and_, or_, func
 
 from app.config import settings
@@ -863,6 +864,7 @@ def lookup_threat_indicator(db: Session, indicator_type: str, value: str) -> Opt
         return None
 
 
+@telemetry.feed_operation
 async def refresh_threat_feed(
     db: Session,
     provider: ThreatFeedProvider,
@@ -1188,9 +1190,19 @@ async def refresh_all_threat_feeds(
     providers: Optional[List[ThreatFeedProvider]] = None,
 ) -> List[Dict[str, Any]]:
     """Synchronize all registered threat feeds sequentially with bounded execution."""
-    feed_providers = providers or list(get_registered_providers().values())
+    feed_providers = list(get_registered_providers().values()) if providers is None else providers
     results = []
     for prov in feed_providers:
-        res = await refresh_threat_feed(db, prov)
+        try:
+            res = await refresh_threat_feed(db, prov)
+        except Exception:
+            # Restore session usability before continuing. If rollback itself fails,
+            # abort the job rather than claiming later sources were attempted safely.
+            db.rollback()
+            res = {
+                "source": telemetry.bounded(prov.source_name, telemetry.SOURCES),
+                "status": "failed",
+                "error_code": "unexpected",
+            }
         results.append(res)
     return results
