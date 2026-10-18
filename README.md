@@ -12,7 +12,7 @@ An advanced full-stack AI-powered phishing detector that inspects URLs, email bo
 - **AI Threat Reports** — Generates Markdown reports from local heuristics without third-party analysis when per-scan consent is off
 - **Explicit per-scan privacy control** — third-party providers are disabled by default; the user must opt in for each scan
 - **Gemini AI Mode** — Optional third-party semantic analysis through Google Gemini when configured and explicitly enabled for a scan
-- **Scan History** — Persists up to 30 previous scans in local browser storage
+- **Scan History** — Backend-persisted, user/guest-scoped scan records with sanitized input previews and analysis results
 - **Cinematic UI** — Dark glassmorphism design with animated scanning overlays and live risk gauges
 
 ---
