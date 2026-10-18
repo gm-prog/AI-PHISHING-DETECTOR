@@ -878,6 +878,7 @@ async def analyze_input(
         guest_token = _get_or_create_guest_token(request, response)
         guest_session_hash = _guest_session_hash(guest_token)
     snippet = sanitize_history_preview(content, max_chars=100)
+    technical_details["external_processing_allowed"] = body.allow_external_processing
 
     db_record = ScanHistory(
         id=str(uuid.uuid4()),
