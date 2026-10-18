@@ -54,9 +54,9 @@ export interface AnalysisResponse {
   status: "safe" | "warning" | "danger";
   phishing_signals: PhishingSignal[];
   ai_explanation: string;
-  external_processing_allowed?: boolean;
+  external_processing_allowed?: boolean | null;
   details: {
-    external_processing_allowed?: boolean;
+    external_processing_allowed?: boolean | null;
     domain?: string;
     suffix?: string;
     subdomain?: string;
