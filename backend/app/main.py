@@ -1017,6 +1017,7 @@ def get_single_scan(
         "status": record.status,
         "response": {
             "input_type": record.input_type,
+            "external_processing_allowed": (record.details or {}).get("external_processing_allowed"),
             "risk_score": record.risk_score,
             "status": record.status,
             "phishing_signals": record.phishing_signals,
