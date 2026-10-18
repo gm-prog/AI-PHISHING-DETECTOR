@@ -348,7 +348,7 @@ def test_webrisk_pipeline_integration_capped_score(test_client, monkeypatch):
 
     res_baseline = test_client.post(
         "/api/analyze",
-        json={"input_type": "url", "content": sample_url},
+        json={"input_type": "url", "content": sample_url, "allow_external_processing": True},
         headers=headers,
     )
     assert res_baseline.status_code == 200
@@ -370,7 +370,7 @@ def test_webrisk_pipeline_integration_capped_score(test_client, monkeypatch):
 
     res_flagged = test_client.post(
         "/api/analyze",
-        json={"input_type": "url", "content": sample_url},
+        json={"input_type": "url", "content": sample_url, "allow_external_processing": True},
         headers=headers,
     )
     assert res_flagged.status_code == 200
@@ -415,17 +415,17 @@ def test_webrisk_cache_real_pipeline_orchestration(test_client, monkeypatch):
     url_b = "https://example-domain-b.org/login"
 
     # Request 1 for URL A: Provider is called
-    res1 = test_client.post("/api/analyze", json={"input_type": "url", "content": url_a}, headers=headers)
+    res1 = test_client.post("/api/analyze", json={"input_type": "url", "content": url_a, "allow_external_processing": True}, headers=headers)
     assert res1.status_code == 200
     assert call_counts["count"] == 1
 
     # Request 2 for SAME URL A: Must hit cache, call count stays 1
-    res2 = test_client.post("/api/analyze", json={"input_type": "url", "content": url_a}, headers=headers)
+    res2 = test_client.post("/api/analyze", json={"input_type": "url", "content": url_a, "allow_external_processing": True}, headers=headers)
     assert res2.status_code == 200
     assert call_counts["count"] == 1
 
     # Request 3 for DIFFERENT URL B: Cache miss, call count increments to 2
-    res3 = test_client.post("/api/analyze", json={"input_type": "url", "content": url_b}, headers=headers)
+    res3 = test_client.post("/api/analyze", json={"input_type": "url", "content": url_b, "allow_external_processing": True}, headers=headers)
     assert res3.status_code == 200
     assert call_counts["count"] == 2
 
@@ -497,7 +497,7 @@ def test_webrisk_provider_non_fatal_on_failure(test_client, monkeypatch):
     headers = get_csrf_headers(test_client)
     res = test_client.post(
         "/api/analyze",
-        json={"input_type": "url", "content": "https://example.com/test"},
+        json={"input_type": "url", "content": "https://example.com/test", "allow_external_processing": True},
         headers=headers,
     )
     assert res.status_code == 200

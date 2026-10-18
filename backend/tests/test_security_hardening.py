@@ -544,7 +544,7 @@ def test_llm_input_is_bounded_before_provider_call(client, monkeypatch):
     oversized = "https://example.com/" + ("A" * (settings.LLM_MAX_INPUT_CHARS + 100))
     res = client.post(
         "/api/analyze",
-        json={"input_type": "url", "content": oversized},
+        json={"input_type": "url", "content": oversized, "allow_external_processing": True},
         headers=csrf_headers(client),
     )
     assert res.status_code == 200
@@ -684,6 +684,7 @@ def test_analysis_rate_limit_blocks_before_expensive_provider_work(client, monke
                 json={
                     "input_type": "url",
                     "content": f"https://provider-order-{i}.example/login",
+                    "allow_external_processing": True,
                 },
                 headers=headers,
             )
@@ -733,6 +734,7 @@ def test_analysis_daily_quota_enforces_one_hundred_requests_and_survives_guest_r
                 json={
                     "input_type": "email_text",
                     "content": f"Routine security review message {i}.",
+                    "allow_external_processing": True,
                 },
                 headers=headers,
             )
@@ -746,6 +748,7 @@ def test_analysis_daily_quota_enforces_one_hundred_requests_and_survives_guest_r
         json={
             "input_type": "email_text",
             "content": "This request must be blocked by the daily quota.",
+            "allow_external_processing": True,
         },
         headers=headers,
     )
@@ -1360,7 +1363,7 @@ def test_provider_error_sanitization_masks_credentials_and_hostnames(client, mon
 
     res = client.post(
         "/api/analyze",
-        json={"input_type": "url", "content": "https://example.com/test"},
+        json={"input_type": "url", "content": "https://example.com/test", "allow_external_processing": True},
         headers=headers,
     )
     assert res.status_code == 200
@@ -1644,3 +1647,205 @@ def test_logging_sanitization_removes_raw_exceptions(caplog):
     # Should not contain Python tracebacks or raw exception reprs
     assert "Traceback" not in log_output
     assert "OperationalError" not in log_output
+
+
+def test_analysis_defaults_to_local_only_and_never_calls_external_providers(client, monkeypatch):
+    """Omitted consent must block VirusTotal, URLhaus, Web Risk, and Gemini even when configured."""
+    calls = {"vt": 0, "urlhaus": 0, "webrisk": 0, "llm": 0}
+
+    async def vt(*args, **kwargs):
+        calls["vt"] += 1
+        raise AssertionError("VirusTotal must not be called in local-only mode")
+
+    async def urlhaus(*args, **kwargs):
+        calls["urlhaus"] += 1
+        raise AssertionError("URLhaus must not be called in local-only mode")
+
+    async def webrisk(*args, **kwargs):
+        calls["webrisk"] += 1
+        raise AssertionError("Web Risk must not be called in local-only mode")
+
+    async def llm(*args, **kwargs):
+        calls["llm"] += 1
+        raise AssertionError("Gemini must not be called in local-only mode")
+
+    monkeypatch.setattr("app.main.settings.GEMINI_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.settings.VIRUSTOTAL_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.settings.GOOGLE_WEB_RISK_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", urlhaus)
+    monkeypatch.setattr("app.main.check_url_with_webrisk", webrisk)
+    monkeypatch.setattr("app.main.analyze_with_llm", llm)
+
+    from app.services.provider_guard import llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache
+    for cache in (llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache):
+        cache.clear()
+
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": "https://privacy-test.example/login"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["external_processing_allowed"] is False
+    assert data["vt_status"] is None
+    assert data["urlhaus_status"] is None
+    assert data["webrisk_status"] is None
+    assert "Local-only mode" in data["ai_explanation"]
+    assert "zero external transmission" not in data["ai_explanation"].lower()
+    assert calls == {"vt": 0, "urlhaus": 0, "webrisk": 0, "llm": 0}
+
+
+def test_explicit_external_processing_consent_invokes_configured_providers(client, monkeypatch):
+    """Explicit opt-in allows configured URL intelligence and Gemini providers to run."""
+    calls = {"vt": 0, "urlhaus": 0, "webrisk": 0, "llm": 0}
+
+    async def vt(url, api_key):
+        calls["vt"] += 1
+        return {"status": "success", "url": url, "malicious_count": 0, "suspicious_count": 0, "reputation_score": 100, "vendors": []}
+
+    async def urlhaus(url):
+        calls["urlhaus"] += 1
+        return {"status": "success", "url": url, "in_database": False, "threat_type": None, "date_added": "", "malware_families": []}
+
+    async def webrisk(url, api_key):
+        calls["webrisk"] += 1
+        return {"status": "success", "url": url, "in_database": False, "threat_types": []}
+
+    async def llm(**kwargs):
+        calls["llm"] += 1
+        score = kwargs["heuristic_score"]
+        return {"risk_score": score, "status": "danger" if score >= 70 else "warning" if score >= 30 else "safe",
+                "phishing_signals": kwargs["heuristic_signals"], "ai_explanation": "Opt-in provider analysis."}
+
+    monkeypatch.setattr("app.main.settings.GEMINI_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.settings.VIRUSTOTAL_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.settings.GOOGLE_WEB_RISK_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", urlhaus)
+    monkeypatch.setattr("app.main.check_url_with_webrisk", webrisk)
+    monkeypatch.setattr("app.main.analyze_with_llm", llm)
+
+    from app.services.provider_guard import llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache
+    for cache in (llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache):
+        cache.clear()
+
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": "https://explicit-consent-test.example/login", "allow_external_processing": True},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["external_processing_allowed"] is True
+    assert calls == {"vt": 1, "urlhaus": 1, "webrisk": 1, "llm": 1}
+
+
+@pytest.mark.parametrize(
+    ("request_fields", "expected_consent"),
+    [
+        ({}, False),
+        ({"allow_external_processing": False}, False),
+        ({"allow_external_processing": True}, True),
+    ],
+)
+def test_analysis_consent_round_trips_through_guest_history(
+    client, request_fields, expected_consent
+):
+    """Consent state returned by analysis must survive persistence and history retrieval."""
+    payload = {
+        "input_type": "email_text",
+        "content": f"consent-history-regression-{uuid.uuid4().hex}: verify account notice",
+        **request_fields,
+    }
+    response = client.post(
+        "/api/analyze",
+        json=payload,
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+    assert response.json()["external_processing_allowed"] is expected_consent
+
+    history = client.get("/api/history")
+    assert history.status_code == 200
+    record = next(item for item in history.json() if payload["content"] in item["content"])
+    assert record["response"]["external_processing_allowed"] is expected_consent
+    assert record["response"]["details"]["external_processing_allowed"] is expected_consent
+
+
+def test_legacy_history_without_consent_metadata_remains_unknown(client):
+    """Older records without consent metadata must not be misreported as local-only."""
+    from datetime import datetime, timezone
+
+    from app.config import settings
+    from app.main import _guest_session_hash
+
+    client.get("/api/health")
+    guest_token = client.cookies.get(settings.GUEST_COOKIE_NAME)
+    if not guest_token:
+        # A scan creates the server-issued guest identity and sets its cookie.
+        bootstrap = client.post(
+            "/api/analyze",
+            json={"input_type": "email_text", "content": "legacy-history-bootstrap"},
+            headers=csrf_headers(client),
+        )
+        assert bootstrap.status_code == 200
+        guest_token = client.cookies.get(settings.GUEST_COOKIE_NAME)
+    assert guest_token
+
+    legacy_id = str(uuid.uuid4())
+    db = TestingSessionLocal()
+    try:
+        db.add(
+            ScanHistory(
+                id=legacy_id,
+                user_id=None,
+                guest_session_hash=_guest_session_hash(guest_token),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                input_type="email_text",
+                content="legacy-history-without-consent-metadata",
+                risk_score=10,
+                status="safe",
+                phishing_signals=[],
+                ai_explanation="Legacy record",
+                details={},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    history = client.get("/api/history")
+    assert history.status_code == 200
+    record = next(item for item in history.json() if item["id"] == legacy_id)
+    assert record["response"]["external_processing_allowed"] is None
+    assert "external_processing_allowed" not in record["response"]["details"]
+
+
+def test_single_scan_history_returns_processing_mode(client):
+    """The single-record history contract must expose the same consent mode as the list endpoint."""
+    email = f"single_history_{uuid.uuid4().hex[:6]}@example.com"
+    assert register(client, email, "SecurePassword123!").status_code == 200
+
+    content = f"single-history-consent-regression-{uuid.uuid4().hex}"
+    scan = client.post(
+        "/api/analyze",
+        json={
+            "input_type": "email_text",
+            "content": content,
+            "allow_external_processing": False,
+        },
+        headers=csrf_headers(client),
+    )
+    assert scan.status_code == 200
+    assert scan.json()["external_processing_allowed"] is False
+
+    history = client.get("/api/history")
+    record = next(item for item in history.json() if content in item["content"])
+    single = client.get(f"/api/history/{record['id']}")
+    assert single.status_code == 200
+    assert single.json()["response"]["external_processing_allowed"] is False
+    assert single.json()["response"]["details"]["external_processing_allowed"] is False

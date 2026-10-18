@@ -9,8 +9,8 @@ An advanced full-stack AI-powered phishing detector that inspects URLs, email bo
 - **URL Analysis** — Detects typosquatting, brand-jacking, suspicious TLDs, IP-based hosting, excessive subdomains, and insecure protocols
 - **Email Text Analysis** — Identifies urgency keywords, social engineering tactics, and embedded malicious links
 - **Email Header Analysis** — Validates SPF/DKIM/DMARC authentication and detects From/Return-Path sender spoofing
-- **AI Threat Reports** — Generates a rich Markdown intelligence report using a local heuristic engine (works 100% offline)
-- **Gemini AI Mode** — Optional integration with Google Gemini 2.5 Flash for deep semantic phishing analysis
+- **Privacy-first Analysis** — Local-only analysis is the default; external providers require explicit per-scan opt-in
+- **Optional External Analysis** — Explicitly opt in per scan to send relevant content/URL indicators to configured threat-intelligence providers or Gemini
 - **Scan History** — Persists up to 30 previous scans in local browser storage
 - **Cinematic UI** — Dark glassmorphism design with animated scanning overlays and live risk gauges
 
@@ -115,17 +115,17 @@ PostgreSQL provisioning, live verification).
 
 ## 🔑 Gemini AI & Threat Intelligence Setup (Optional)
 
-The detector works fully offline with its autonomous heuristic engine. To enable server-side AI-powered semantic threat analysis and external threat feeds:
+The detector defaults to local-only analysis: local heuristics and locally stored threat-feed indicators run without invoking VirusTotal, URLhaus, Google Web Risk, or Gemini. Users may explicitly opt in for external analysis on an individual scan. External providers have different data-handling policies; see [Privacy and Data Processing](docs/privacy-and-data-processing.md). API keys alone never enable external processing. To configure optional providers:
 
 1. **Google Gemini AI**: Get an API key from [Google AI Studio](https://aistudio.google.com/) and set `GEMINI_API_KEY=your_key_here` in `backend/.env`.
 2. **Google Web Risk**: Get an API key from [Google Cloud Console](https://console.cloud.google.com/) (Web Risk API) and set `GOOGLE_WEB_RISK_API_KEY=your_key_here` in `backend/.env`.
 3. **VirusTotal**: Set `VIRUSTOTAL_API_KEY=your_key_here` in `backend/.env`.
-4. **URLhaus**: No API key required; automated bounded lookups are enabled by default for URL analysis.
+4. **URLhaus**: No API key required; bounded URL lookups run only when the user explicitly opts in to external processing for that scan.
 5. **PhishTank Feed**: (Implemented connector) Set `PHISHTANK_API_KEY=your_key_here` in `backend/.env` (optional; feed works without key or with application key).
 6. **OpenPhish Feed**: (Implemented connector) Enabled by default via community feed (`https://openphish.com/feed.txt`).
 7. **MISP Threat Sharing**: (Configurable adapter) Set `MISP_SERVER_URL=https://misp.your-org.local` and `MISP_API_KEY=your_key_here` in `backend/.env` (disabled if unconfigured).
 
-All keys are server-side only and never leaked to frontend clients or persisted in logs.
+All keys are server-side only and never leaked to frontend clients or persisted in logs. External processing is controlled per scan by `allow_external_processing`, which defaults to `false`.
 
 ---
 
