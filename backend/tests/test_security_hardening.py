@@ -1644,3 +1644,98 @@ def test_logging_sanitization_removes_raw_exceptions(caplog):
     # Should not contain Python tracebacks or raw exception reprs
     assert "Traceback" not in log_output
     assert "OperationalError" not in log_output
+
+
+def test_analysis_defaults_to_local_only_and_never_calls_external_providers(client, monkeypatch):
+    """Omitted consent must block VirusTotal, URLhaus, Web Risk, and Gemini even when configured."""
+    calls = {"vt": 0, "urlhaus": 0, "webrisk": 0, "llm": 0}
+
+    async def vt(*args, **kwargs):
+        calls["vt"] += 1
+        raise AssertionError("VirusTotal must not be called in local-only mode")
+
+    async def urlhaus(*args, **kwargs):
+        calls["urlhaus"] += 1
+        raise AssertionError("URLhaus must not be called in local-only mode")
+
+    async def webrisk(*args, **kwargs):
+        calls["webrisk"] += 1
+        raise AssertionError("Web Risk must not be called in local-only mode")
+
+    async def llm(*args, **kwargs):
+        calls["llm"] += 1
+        raise AssertionError("Gemini must not be called in local-only mode")
+
+    monkeypatch.setattr("app.main.settings.GEMINI_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.settings.VIRUSTOTAL_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.settings.GOOGLE_WEB_RISK_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", urlhaus)
+    monkeypatch.setattr("app.main.check_url_with_webrisk", webrisk)
+    monkeypatch.setattr("app.main.analyze_with_llm", llm)
+
+    from app.services.provider_guard import llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache
+    for cache in (llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache):
+        cache.clear()
+
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": "https://privacy-test.example/login"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["external_processing_allowed"] is False
+    assert data["vt_status"] is None
+    assert data["urlhaus_status"] is None
+    assert data["webrisk_status"] is None
+    assert "Local-only mode" in data["ai_explanation"]
+    assert "zero external transmission" not in data["ai_explanation"].lower()
+    assert calls == {"vt": 0, "urlhaus": 0, "webrisk": 0, "llm": 0}
+
+
+def test_explicit_external_processing_consent_invokes_configured_providers(client, monkeypatch):
+    """Explicit opt-in allows configured URL intelligence and Gemini providers to run."""
+    calls = {"vt": 0, "urlhaus": 0, "webrisk": 0, "llm": 0}
+
+    async def vt(url, api_key):
+        calls["vt"] += 1
+        return {"status": "success", "url": url, "malicious_count": 0, "suspicious_count": 0, "reputation_score": 100, "vendors": []}
+
+    async def urlhaus(url):
+        calls["urlhaus"] += 1
+        return {"status": "success", "url": url, "in_database": False, "threat_type": None, "date_added": "", "malware_families": []}
+
+    async def webrisk(url, api_key):
+        calls["webrisk"] += 1
+        return {"status": "success", "url": url, "in_database": False, "threat_types": []}
+
+    async def llm(**kwargs):
+        calls["llm"] += 1
+        score = kwargs["heuristic_score"]
+        return {"risk_score": score, "status": "danger" if score >= 70 else "warning" if score >= 30 else "safe",
+                "phishing_signals": kwargs["heuristic_signals"], "ai_explanation": "Opt-in provider analysis."}
+
+    monkeypatch.setattr("app.main.settings.GEMINI_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.settings.VIRUSTOTAL_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.settings.GOOGLE_WEB_RISK_API_KEY", "configured-test-key")
+    monkeypatch.setattr("app.main.analyze_url_with_virustotal", vt)
+    monkeypatch.setattr("app.main.check_url_with_urlhaus", urlhaus)
+    monkeypatch.setattr("app.main.check_url_with_webrisk", webrisk)
+    monkeypatch.setattr("app.main.analyze_with_llm", llm)
+
+    from app.services.provider_guard import llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache
+    for cache in (llm_cache, virustotal_cache, urlhaus_cache, webrisk_cache):
+        cache.clear()
+
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": "https://explicit-consent-test.example/login", "allow_external_processing": True},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["external_processing_allowed"] is True
+    assert calls == {"vt": 1, "urlhaus": 1, "webrisk": 1, "llm": 1}
