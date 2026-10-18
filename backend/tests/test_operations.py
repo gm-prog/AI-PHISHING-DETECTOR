@@ -87,11 +87,13 @@ def client(monkeypatch, database):
     main.limiter.reset()
 
 
-def scan(client, input_type="email_text"):
+def scan(client, input_type="email_text", allow_external_processing=False):
     client.get("/api/health")
-    return client.post("/api/analyze", json={"input_type": input_type,
-        "content": "https://" + SECRET if input_type == "url" else SECRET},
-        headers={"X-CSRF-Token": client.cookies.get(main.settings.CSRF_COOKIE_NAME)})
+    return client.post("/api/analyze", json={
+        "input_type": input_type,
+        "content": "https://" + SECRET if input_type == "url" else SECRET,
+        "allow_external_processing": allow_external_processing,
+    }, headers={"X-CSRF-Token": client.cookies.get(main.settings.CSRF_COOKIE_NAME)})
 
 
 def test_initialization_idempotent_and_recreatable(sinks):
@@ -156,8 +158,10 @@ def test_readiness_connection_lifecycle_and_sanitization(monkeypatch, client, fa
 @pytest.mark.parametrize("input_type", ["url", "email_text", "email_header"])
 def test_analysis_spans_metrics_privacy_and_units(sinks, client, input_type, caplog):
     exporter, reader = sinks
+    # This test exercises provider and LLM-fallback instrumentation, so opt in
+    # explicitly. Separate privacy tests cover the default local-only path.
     with caplog.at_level(logging.INFO, logger="sentinel.operations"):
-        response = scan(client, input_type)
+        response = scan(client, input_type, allow_external_processing=True)
     assert response.status_code == 200
     recorded = spans(exporter)
     names = {s.name for s in recorded}
