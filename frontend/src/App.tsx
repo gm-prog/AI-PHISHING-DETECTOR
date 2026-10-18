@@ -215,6 +215,16 @@ export default function App() {
                   transition={{ duration: 0.25 }}
                   className="space-y-5"
                 >
+                  {/* Explicitly show the processing mode for the current report */}
+                  <div className={"rounded border p-3 text-xs font-mono " + (activeResponse.external_processing_allowed ? "border-amber-500/30 bg-amber-950/20 text-amber-200" : "border-emerald-500/30 bg-emerald-950/20 text-emerald-200")}>
+                    <strong>{activeResponse.external_processing_allowed ? "EXTERNAL PROCESSING ENABLED" : "LOCAL-ONLY ANALYSIS"}</strong>
+                    <p className="mt-1 text-slate-300">
+                      {activeResponse.external_processing_allowed
+                        ? "You opted in for this scan. Relevant submitted content or URL indicators may have been sent to configured third-party providers."
+                        : "No third-party analysis providers were invoked for this scan. Local heuristics and local threat-feed lookup were used."}
+                    </p>
+                  </div>
+
                   {/* Gauge & Radar Grid */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                     <RiskGauge score={activeResponse.risk_score} status={activeResponse.status} />
