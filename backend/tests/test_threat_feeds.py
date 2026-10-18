@@ -384,7 +384,7 @@ def test_evidence_fusion_combined_with_webrisk_and_virustotal(client, db_session
     monkeypatch.setattr("app.main.check_url_with_urlhaus", mock_uh_flagged)
 
     headers = get_csrf_headers(client)
-    res = client.post("/api/analyze", json={"input_type": "url", "content": test_url}, headers=headers)
+    res = client.post("/api/analyze", json={"input_type": "url", "content": test_url, "allow_external_processing": True}, headers=headers)
     assert res.status_code == 200
     data = res.json()
 
