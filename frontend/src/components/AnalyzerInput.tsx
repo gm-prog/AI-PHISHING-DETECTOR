@@ -51,7 +51,10 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
       }
     }
 
-    onAnalyze(activeTab, trimmedContent, allowExternalProcessing);
+    // Consent is deliberately one-shot: the next scan must opt in independently.
+    const scanAllowsExternalProcessing = allowExternalProcessing;
+    setAllowExternalProcessing(false);
+    onAnalyze(activeTab, trimmedContent, scanAllowsExternalProcessing);
   };
 
   const activeSamples = MOCK_SAMPLES.filter((s) => s.type === activeTab);
