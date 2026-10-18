@@ -978,6 +978,7 @@ def get_history(
         "status": r.status,
         "response": {
             "input_type": r.input_type,
+            "external_processing_allowed": (r.details or {}).get("external_processing_allowed"),
             "risk_score": r.risk_score,
             "status": r.status,
             "phishing_signals": r.phishing_signals,
