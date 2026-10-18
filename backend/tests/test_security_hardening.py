@@ -1742,3 +1742,84 @@ def test_explicit_external_processing_consent_invokes_configured_providers(clien
     data = response.json()
     assert data["external_processing_allowed"] is True
     assert calls == {"vt": 1, "urlhaus": 1, "webrisk": 1, "llm": 1}
+
+
+@pytest.mark.parametrize(
+    ("request_fields", "expected_consent"),
+    [
+        ({}, False),
+        ({"allow_external_processing": False}, False),
+        ({"allow_external_processing": True}, True),
+    ],
+)
+def test_analysis_consent_round_trips_through_guest_history(
+    client, request_fields, expected_consent
+):
+    """Consent state returned by analysis must survive persistence and history retrieval."""
+    payload = {
+        "input_type": "email_text",
+        "content": f"consent-history-regression-{uuid.uuid4().hex}: verify account notice",
+        **request_fields,
+    }
+    response = client.post(
+        "/api/analyze",
+        json=payload,
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+    assert response.json()["external_processing_allowed"] is expected_consent
+
+    history = client.get("/api/history")
+    assert history.status_code == 200
+    record = next(item for item in history.json() if payload["content"] in item["content"])
+    assert record["response"]["external_processing_allowed"] is expected_consent
+    assert record["response"]["details"]["external_processing_allowed"] is expected_consent
+
+
+def test_legacy_history_without_consent_metadata_remains_unknown(client):
+    """Older records without consent metadata must not be misreported as local-only."""
+    from datetime import datetime, timezone
+
+    from app.config import settings
+    from app.main import _guest_session_hash
+
+    client.get("/api/health")
+    guest_token = client.cookies.get(settings.GUEST_COOKIE_NAME)
+    if not guest_token:
+        # A scan creates the server-issued guest identity and sets its cookie.
+        bootstrap = client.post(
+            "/api/analyze",
+            json={"input_type": "email_text", "content": "legacy-history-bootstrap"},
+            headers=csrf_headers(client),
+        )
+        assert bootstrap.status_code == 200
+        guest_token = client.cookies.get(settings.GUEST_COOKIE_NAME)
+    assert guest_token
+
+    legacy_id = str(uuid.uuid4())
+    db = TestingSessionLocal()
+    try:
+        db.add(
+            ScanHistory(
+                id=legacy_id,
+                user_id=None,
+                guest_session_hash=_guest_session_hash(guest_token),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                input_type="email_text",
+                content="legacy-history-without-consent-metadata",
+                risk_score=10,
+                status="safe",
+                phishing_signals=[],
+                ai_explanation="Legacy record",
+                details={},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    history = client.get("/api/history")
+    assert history.status_code == 200
+    record = next(item for item in history.json() if item["id"] == legacy_id)
+    assert record["response"]["external_processing_allowed"] is None
+    assert "external_processing_allowed" not in record["response"]["details"]
