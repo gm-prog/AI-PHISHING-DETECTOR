@@ -27,7 +27,7 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
     setContent("");
     setValidationError("");
     setAllowExternalProcessing(
-      transitionExternalProcessingConsent(allowExternalProcessing, "context-change").nextValue,
+      transitionExternalProcessingConsent(allowExternalProcessing, "tab-change").nextValue,
     );
   };
 
@@ -35,7 +35,7 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
     setContent(sampleContent);
     setValidationError("");
     setAllowExternalProcessing(
-      transitionExternalProcessingConsent(allowExternalProcessing, "context-change").nextValue,
+      transitionExternalProcessingConsent(allowExternalProcessing, "autofill").nextValue,
     );
   };
 
@@ -205,7 +205,7 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
               onClick={() => {
                 setContent("");
                 setAllowExternalProcessing(
-                  transitionExternalProcessingConsent(allowExternalProcessing, "context-change").nextValue,
+                  transitionExternalProcessingConsent(allowExternalProcessing, "reset-input").nextValue,
                 );
               }}
               className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 font-mono transition cursor-pointer"
