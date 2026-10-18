@@ -216,12 +216,26 @@ export default function App() {
                   className="space-y-5"
                 >
                   {/* Explicitly show the processing mode for the current report */}
-                  <div className={"rounded border p-3 text-xs font-mono " + (activeResponse.external_processing_allowed ? "border-amber-500/30 bg-amber-950/20 text-amber-200" : "border-emerald-500/30 bg-emerald-950/20 text-emerald-200")}>
-                    <strong>{activeResponse.external_processing_allowed ? "EXTERNAL PROCESSING ENABLED" : "LOCAL-ONLY ANALYSIS"}</strong>
+                  <div className={"rounded border p-3 text-xs font-mono " + (
+                    activeResponse.external_processing_allowed === true
+                      ? "border-amber-500/30 bg-amber-950/20 text-amber-200"
+                      : activeResponse.external_processing_allowed === false
+                        ? "border-emerald-500/30 bg-emerald-950/20 text-emerald-200"
+                        : "border-slate-500/30 bg-slate-950/20 text-slate-200"
+                  )}>
+                    <strong>{
+                      activeResponse.external_processing_allowed === true
+                        ? "EXTERNAL PROCESSING ENABLED"
+                        : activeResponse.external_processing_allowed === false
+                          ? "LOCAL-ONLY ANALYSIS"
+                          : "PROCESSING MODE UNKNOWN"
+                    }</strong>
                     <p className="mt-1 text-slate-300">
-                      {activeResponse.external_processing_allowed
+                      {activeResponse.external_processing_allowed === true
                         ? "You opted in for this scan. Relevant submitted content or URL indicators may have been sent to configured third-party providers."
-                        : "No third-party analysis providers were invoked for this scan. Local heuristics and local threat-feed lookup were used."}
+                        : activeResponse.external_processing_allowed === false
+                          ? "No third-party analysis providers were invoked for this scan. Local heuristics and local threat-feed lookup were used."
+                          : "This historical scan does not record whether external providers were invoked, so its processing mode cannot be verified."}
                     </p>
                   </div>
 
