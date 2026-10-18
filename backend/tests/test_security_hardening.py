@@ -1823,3 +1823,29 @@ def test_legacy_history_without_consent_metadata_remains_unknown(client):
     record = next(item for item in history.json() if item["id"] == legacy_id)
     assert record["response"]["external_processing_allowed"] is None
     assert "external_processing_allowed" not in record["response"]["details"]
+
+
+def test_single_scan_history_returns_processing_mode(client):
+    """The single-record history contract must expose the same consent mode as the list endpoint."""
+    email = f"single_history_{uuid.uuid4().hex[:6]}@example.com"
+    assert register(client, email, "SecurePassword123!").status_code == 200
+
+    content = f"single-history-consent-regression-{uuid.uuid4().hex}"
+    scan = client.post(
+        "/api/analyze",
+        json={
+            "input_type": "email_text",
+            "content": content,
+            "allow_external_processing": False,
+        },
+        headers=csrf_headers(client),
+    )
+    assert scan.status_code == 200
+    assert scan.json()["external_processing_allowed"] is False
+
+    history = client.get("/api/history")
+    record = next(item for item in history.json() if content in item["content"])
+    single = client.get(f"/api/history/{record['id']}")
+    assert single.status_code == 200
+    assert single.json()["response"]["external_processing_allowed"] is False
+    assert single.json()["response"]["details"]["external_processing_allowed"] is False
