@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { transitionExternalProcessingConsent } from "./consentLifecycle.mjs";
+import { transitionExternalProcessingConsent } from "./consentLifecycle.js";
 import { Globe, FileText, Code2, CornerDownRight, RotateCcw, Zap } from "lucide-react";
 import { MOCK_SAMPLES } from "../mockData";
 
