@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { transitionExternalProcessingConsent } from "./consentLifecycle.mjs";
 import { Globe, FileText, Code2, CornerDownRight, RotateCcw, Zap } from "lucide-react";
 import { MOCK_SAMPLES } from "../mockData";
 
@@ -25,11 +26,17 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
     setActiveTab(tabId);
     setContent("");
     setValidationError("");
+    setAllowExternalProcessing(
+      transitionExternalProcessingConsent(allowExternalProcessing, "context-change").nextValue,
+    );
   };
 
   const handleAutofill = (sampleContent: string) => {
     setContent(sampleContent);
     setValidationError("");
+    setAllowExternalProcessing(
+      transitionExternalProcessingConsent(allowExternalProcessing, "context-change").nextValue,
+    );
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -52,9 +59,12 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
     }
 
     // Consent is deliberately one-shot: the next scan must opt in independently.
-    const scanAllowsExternalProcessing = allowExternalProcessing;
-    setAllowExternalProcessing(false);
-    onAnalyze(activeTab, trimmedContent, scanAllowsExternalProcessing);
+    const consentTransition = transitionExternalProcessingConsent(
+      allowExternalProcessing,
+      "submit",
+    );
+    setAllowExternalProcessing(consentTransition.nextValue);
+    onAnalyze(activeTab, trimmedContent, consentTransition.forCurrentScan);
   };
 
   const activeSamples = MOCK_SAMPLES.filter((s) => s.type === activeTab);
@@ -192,7 +202,12 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
           {content && !isLoading ? (
             <button
               type="button"
-              onClick={() => setContent("")}
+              onClick={() => {
+                setContent("");
+                setAllowExternalProcessing(
+                  transitionExternalProcessingConsent(allowExternalProcessing, "context-change").nextValue,
+                );
+              }}
               className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 font-mono transition cursor-pointer"
             >
               <RotateCcw className="w-3.5 h-3.5" /> Reset Input
