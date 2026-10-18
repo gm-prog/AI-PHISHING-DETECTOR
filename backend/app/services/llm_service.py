@@ -8,6 +8,9 @@ import json
 import logging
 import re
 import secrets
+import time
+from pydantic import ValidationError
+from app import telemetry
 
 from app.services.provider_guard import llm_cache, llm_semaphore, stable_key
 
@@ -132,6 +135,14 @@ def get_fallback_analysis(input_type: str, content: str, heuristic_score: int, h
     }
 
 
+class _InvalidOutputFallback(dict):
+    """Private worker result marker; no metadata keys enter the public response.
+
+    Accounting belongs to the awaiting caller, not the worker: a timed-out
+    synchronous SDK call may finish later and must not emit a second fallback.
+    """
+
+
 def _execute_gemini_call(
     input_type: str,
     content: str,
@@ -211,7 +222,9 @@ Analyze the untrusted content above enclosed in the boundary="{boundary_token}" 
         validated_model = LlmPhishingAnalysisSchema.model_validate(raw_dict)
     except Exception:
         logger.warning("event=llm_output_validation_failed")
-        return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
+        return _InvalidOutputFallback(
+            get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
+        )
 
     # Deterministic signal merging and deduplication
     existing_ids = set()
@@ -260,7 +273,7 @@ async def analyze_with_llm(
 ) -> Dict[str, Any]:
     """Analyze content with Gemini while bounding concurrency, queue wait, and repeat spend."""
     if not api_key:
-        logger.info("Skipping LLM analysis: no server-side API key configured.")
+        telemetry.fallback("unconfigured")
         return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
 
     cache_key = stable_key(
@@ -272,40 +285,65 @@ async def analyze_with_llm(
     if cached is not None:
         return cached
 
-    # Bound provider queue wait
-    try:
-        await asyncio.wait_for(llm_semaphore.acquire(), timeout=acquire_timeout_seconds)
-    except asyncio.TimeoutError:
-        logger.warning("provider=gemini event=queue_timeout")
+    with telemetry.span("provider.gemini", provider="gemini") as current:
+        # Bound provider queue wait
+        started = time.monotonic()
+        try:
+            await asyncio.wait_for(llm_semaphore.acquire(), timeout=acquire_timeout_seconds)
+        except asyncio.TimeoutError:
+            current.set_attribute("outcome", "queue_exhausted")
+            telemetry.provider_result("gemini", "queue_exhausted", started)
+            telemetry.fallback("queue_exhausted")
+            return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
+
+        finally:
+            telemetry.measure("sentinel.provider.queue_wait", time.monotonic() - started, provider="gemini")
+
+        outcome = "error"
+        execution_started = time.monotonic()
+        try:
+            # Check cache again inside lock in case a concurrent task already populated it
+            cached = await llm_cache.get(cache_key)
+            if cached is not None:
+                outcome = "skipped"
+                return cached
+
+            # Execute provider call with independent timeout
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _execute_gemini_call,
+                    input_type,
+                    content,
+                    api_key,
+                    heuristic_score,
+                    heuristic_signals,
+                ),
+                timeout=request_timeout_seconds,
+            )
+            if isinstance(result, _InvalidOutputFallback):
+                telemetry.fallback("invalid_output")
+                outcome = "error"
+                result = dict(result)  # Strip the private marker before caching/returning.
+            else:
+                outcome = "success"
+            await llm_cache.set(cache_key, result)
+            return result
+        except asyncio.TimeoutError:
+            outcome = "timeout"
+            telemetry.fallback("timeout")
+            logger.warning("provider=gemini event=request_timeout")
+        except ValidationError:
+            telemetry.fallback("invalid_output")
+        except APIError:
+            telemetry.fallback("provider_error")
+            logger.warning("provider=gemini event=request_failed")
+        except Exception:
+            telemetry.fallback("provider_error")
+            logger.error("provider=gemini event=unexpected_error")
+        finally:
+            current.set_attribute("outcome", outcome)
+            llm_semaphore.release()
+            telemetry.provider_result("gemini", outcome, started)
+            telemetry.measure("sentinel.provider.execution.duration", time.monotonic() - execution_started, provider="gemini")
+
         return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
-
-    try:
-        # Check cache again inside lock in case a concurrent task already populated it
-        cached = await llm_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        # Execute provider call with independent timeout
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                _execute_gemini_call,
-                input_type,
-                content,
-                api_key,
-                heuristic_score,
-                heuristic_signals,
-            ),
-            timeout=request_timeout_seconds,
-        )
-        await llm_cache.set(cache_key, result)
-        return result
-    except asyncio.TimeoutError:
-        logger.warning("provider=gemini event=request_timeout")
-    except APIError as e:
-        logger.warning("provider=gemini event=request_failed status=%s", getattr(e, "code", "unknown"))
-    except Exception:
-        logger.error("provider=gemini event=unexpected_error")
-    finally:
-        llm_semaphore.release()
-
-    return get_fallback_analysis(input_type, content, heuristic_score, heuristic_signals)
