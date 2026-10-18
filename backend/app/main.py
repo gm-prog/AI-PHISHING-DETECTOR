@@ -928,7 +928,7 @@ async def analyze_input(
 
     # Apply the trusted disclosure to both local and Gemini-generated reports.
     ai_explanation = (
-        f"{ai_explanation.rstrip()}\\n\\n---\\n\\n"
+        f"{ai_explanation.rstrip()}\n\n---\n\n"
         f"{build_analysis_privacy_disclosure(input_type, body.allow_external_processing)}"
     )
 
