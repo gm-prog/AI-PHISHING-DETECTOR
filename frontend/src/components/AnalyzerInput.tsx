@@ -3,7 +3,7 @@ import { Globe, FileText, Code2, CornerDownRight, RotateCcw, Zap } from "lucide-
 import { MOCK_SAMPLES } from "../mockData";
 
 interface AnalyzerInputProps {
-  onAnalyze: (type: "url" | "email_text" | "email_header", content: string) => void;
+  onAnalyze: (type: "url" | "email_text" | "email_header", content: string, allowExternalProcessing: boolean) => void;
   isLoading: boolean;
 }
 
@@ -11,6 +11,7 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
   const [activeTab, setActiveTab] = useState<"url" | "email_text" | "email_header">("url");
   const [content, setContent] = useState("");
   const [validationError, setValidationError] = useState("");
+  const [allowExternalProcessing, setAllowExternalProcessing] = useState(false);
 
   const tabOptions = [
     { id: "url", name: "URL Vector", icon: Globe, placeholder: "https://secure-paypa1-update.xyz/login", max: 2048 },
@@ -50,7 +51,7 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
       }
     }
 
-    onAnalyze(activeTab, trimmedContent);
+    onAnalyze(activeTab, trimmedContent, allowExternalProcessing);
   };
 
   const activeSamples = MOCK_SAMPLES.filter((s) => s.type === activeTab);
@@ -159,6 +160,29 @@ export const AnalyzerInput: React.FC<AnalyzerInputProps> = ({ onAnalyze, isLoadi
             </div>
           </div>
         )}
+
+        {/* Explicit per-scan privacy consent; unchecked is local-only */}
+        <div className="rounded border border-white/10 bg-[#090D16] p-3 text-left">
+          <label className="flex items-start gap-2.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allowExternalProcessing}
+              onChange={(e) => setAllowExternalProcessing(e.target.checked)}
+              disabled={isLoading}
+              className="mt-0.5 accent-[#00F0FF]"
+              id="external_processing_consent"
+            />
+            <span className="text-xs text-slate-200 font-mono">
+              Allow external threat intelligence and AI for this scan (optional)
+              <span className="block mt-1 text-[11px] leading-relaxed text-slate-400 font-sans">
+                Off by default: local heuristics and locally stored threat feeds only. If enabled, relevant URL indicators or submitted content may be sent to configured third-party providers such as VirusTotal, URLhaus, Google Web Risk, or Gemini, under their own data-handling policies. This choice applies only to this scan.
+              </span>
+            </span>
+          </label>
+          <p className="mt-2 text-[10px] font-mono uppercase tracking-wider text-emerald-400">
+            {allowExternalProcessing ? "External processing enabled for this scan" : "Local-only mode selected"}
+          </p>
+        </div>
 
         {/* Action Controls */}
         <div className="flex justify-between items-center pt-2.5 border-t border-white/10">
