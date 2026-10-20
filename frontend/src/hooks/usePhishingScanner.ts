@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
-import { usePhishingContext } from "../context/PhishingContext";
-import { useAuth } from "../context/AuthContext";
+import { useCallback, useEffect, useRef } from "react";
+import { usePhishingContext } from "../context/usePhishingContext";
+import { useAuth } from "../context/useAuth";
 import type { AnalysisResponse } from "../types";
 
 export interface ScanStep {
@@ -28,7 +28,7 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
   const stepTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Load history from backend whenever auth status changes
-  const fetchHistory = async () => {
+  const fetchHistory = useCallback(async () => {
     try {
       const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
       const res = await authFetch(`${API_BASE}/api/history`);
@@ -39,11 +39,12 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
     } catch (err) {
       console.error("Failed to load history from backend:", err);
     }
-  };
+  }, [authFetch, setHistory]);
 
   useEffect(() => {
-    fetchHistory();
-  }, [isAuthenticated, setHistory]);
+    const initialFetch = window.setTimeout(() => { void fetchHistory(); }, 0);
+    return () => window.clearTimeout(initialFetch);
+  }, [isAuthenticated, fetchHistory]);
 
   const handleAnalyze = async (type: "url" | "email_text" | "email_header", content: string, allowExternalProcessing = false) => {
     setIsLoading(true);
@@ -87,12 +88,13 @@ export function usePhishingScanner(addToast: (msg: string, type: "success" | "er
       addToast(`Threat Scan Complete: Classification ${data.status.toUpperCase()} (${data.risk_score}/100)`, "success");
 
       // Refetch history from backend to ensure synchronization
-      fetchHistory();
-    } catch (err: any) {
+      void fetchHistory();
+    } catch (err: unknown) {
+      const message = err instanceof Error && err.message ? err.message : "Could not connect to the backend server.";
       console.error(err);
       clearTimeout(stepTimerRef.current);
-      setError(err.message || "Could not connect to the backend server.");
-      addToast(err.message || "Threat inspection scan failed.", "error");
+      setError(message);
+      addToast(message, "error");
     } finally {
       setIsLoading(false);
     }
