@@ -75,15 +75,18 @@ function result(level, code, message) {
  * Normalize a hostname for loopback comparison: URL keeps IPv6 hosts bracketed.
  */
 function normalizeHostname(hostname) {
-  return hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  // URL keeps IPv6 hosts bracketed. A trailing DNS dot is equivalent to the
+  // same absolute hostname without the dot (including localhost special-use).
+  return hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1").replace(/\.+$/, "");
 }
 
 function isLoopback(hostname) {
   const host = normalizeHostname(hostname);
-  if (LOOPBACK_HOSTNAMES.includes(hostname.toLowerCase()) || LOOPBACK_HOSTNAMES.includes(host)) {
+  if (LOOPBACK_HOSTNAMES.includes(host) || host === "localhost" || host.endsWith(".localhost")) {
     return true;
   }
-  // 127.0.0.0/8 is entirely loopback.
+  // 127.0.0.0/8 is entirely loopback. WHATWG URL parsing canonicalizes IPv4
+  // numeric forms before this check.
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 
@@ -162,6 +165,17 @@ export function validateApiBaseUrl(rawValue, options = {}) {
       LEVEL_ERROR,
       "query",
       "VITE_API_BASE_URL must not contain a query string or fragment.",
+    );
+  }
+
+  // URL.pathname is "/" for both a bare origin and an explicitly supplied
+  // trailing slash. The frontend appends "/api/..." verbatim, so reject the
+  // explicit slash instead of approving a base that can yield "//api/..." URLs.
+  if (raw.endsWith("/")) {
+    return result(
+      LEVEL_ERROR,
+      "trailing-slash",
+      "VITE_API_BASE_URL must not end with a slash. Supply only scheme + host; the client appends /api/...",
     );
   }
 
