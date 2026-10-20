@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { PhishingContext } from "./phishingContextDefinition";
 import type { FullHistoryItem } from "./phishingContextDefinition";
+import type { AnalysisResponse } from "../types";
 import type { ReactNode } from "react";
 
 
