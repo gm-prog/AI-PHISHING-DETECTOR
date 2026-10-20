@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 interface RiskGaugeProps {
   score: number;
@@ -7,28 +7,25 @@ interface RiskGaugeProps {
 
 export const RiskGauge: React.FC<RiskGaugeProps> = ({ score, status }) => {
   const [animatedScore, setAnimatedScore] = useState(0);
+  const currentScoreRef = useRef(0);
 
   useEffect(() => {
-    let start = 0;
+    let current = currentScoreRef.current;
     const end = score;
-    if (start === end) {
-      setAnimatedScore(end);
-      return;
-    }
+    if (current === end) return;
 
     const duration = 600;
-    const increment = end > start ? 1 : -1;
-    const stepTime = Math.abs(Math.floor(duration / (end - start)));
-    
-    const timer = setInterval(() => {
-      start += increment;
-      setAnimatedScore(start);
-      if (start === end) {
-        clearInterval(timer);
-      }
+    const increment = end > current ? 1 : -1;
+    const stepTime = Math.abs(Math.floor(duration / (end - current)));
+
+    const timer = window.setInterval(() => {
+      current += increment;
+      currentScoreRef.current = current;
+      setAnimatedScore(current);
+      if (current === end) window.clearInterval(timer);
     }, Math.max(stepTime, 6));
 
-    return () => clearInterval(timer);
+    return () => window.clearInterval(timer);
   }, [score]);
 
   const getStatusTokens = () => {

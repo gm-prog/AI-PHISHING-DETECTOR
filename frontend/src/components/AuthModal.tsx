@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Shield, Lock, Mail, UserPlus, LogIn, X, AlertTriangle, CheckCircle2 } from "lucide-react";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 
 interface AuthModalProps {
   onAddToast: (message: string, type: "success" | "error" | "info") => void;
@@ -15,16 +15,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onAddToast }) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const resetForm = () => {
+  const resetForm = useCallback(() => {
     setEmail("");
     setPassword("");
     setErrorMsg("");
-  };
+  }, []);
 
-  const handleClose = () => {
+  const handleClose = useCallback(() => {
     resetForm();
     closeAuthModal();
-  };
+  }, [closeAuthModal, resetForm]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -34,7 +34,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onAddToast }) => {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isAuthModalOpen]);
+  }, [handleClose, isAuthModalOpen]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -15,7 +15,7 @@ import { ShieldCheck, ShieldAlert, Terminal, Activity, Database } from "lucide-r
 import { motion, AnimatePresence } from "framer-motion";
 import GlassSurface from "./components/GlassSurface";
 
-import { usePhishingContext } from "./context/PhishingContext";
+import { usePhishingContext } from "./context/usePhishingContext";
 import { usePhishingScanner, SCANNING_STEPS } from "./hooks/usePhishingScanner";
 
 export default function App() {

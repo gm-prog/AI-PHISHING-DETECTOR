@@ -1,25 +1,9 @@
-import { createContext, useContext, useState } from "react";
+import { useState } from "react";
+import { PhishingContext } from "./phishingContextDefinition";
+import type { FullHistoryItem } from "./phishingContextDefinition";
+import type { AnalysisResponse } from "../types";
 import type { ReactNode } from "react";
-import type { AnalysisResponse, ScanHistoryItem } from "../types";
 
-export interface FullHistoryItem extends ScanHistoryItem {
-  response: AnalysisResponse;
-}
-
-interface PhishingContextType {
-  history: FullHistoryItem[];
-  setHistory: (history: FullHistoryItem[]) => void;
-  isLoading: boolean;
-  setIsLoading: (val: boolean) => void;
-  error: string | null;
-  setError: (err: string | null) => void;
-  activeResponse: AnalysisResponse | null;
-  setActiveResponse: (res: AnalysisResponse | null) => void;
-  scanStepIndex: number;
-  setScanStepIndex: (idx: number) => void;
-}
-
-const PhishingContext = createContext<PhishingContextType | undefined>(undefined);
 
 export function PhishingProvider({ children }: { children: ReactNode }) {
   const [history, setHistory] = useState<FullHistoryItem[]>([]);
@@ -48,10 +32,3 @@ export function PhishingProvider({ children }: { children: ReactNode }) {
   );
 }
 
-export function usePhishingContext() {
-  const context = useContext(PhishingContext);
-  if (!context) {
-    throw new Error("usePhishingContext must be used within a PhishingProvider");
-  }
-  return context;
-}

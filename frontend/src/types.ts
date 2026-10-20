@@ -78,7 +78,7 @@ export interface AnalysisResponse {
     dkim_status?: string;
     sender_mismatch?: boolean;
     error?: string;
-    [key: string]: any;
+    [key: string]: unknown;
   };
   virustotal_findings?: VirusTotalData;
   vt_status?: string;
@@ -92,7 +92,7 @@ export interface AnalysisResponse {
   webrisk_status?: string;
   webrisk_threat_types?: string[];
   webrisk_in_database?: boolean;
-  local_feed_findings?: Record<string, any>;
+  local_feed_findings?: Record<string, unknown>;
 }
 
 export interface ScanHistoryItem {
