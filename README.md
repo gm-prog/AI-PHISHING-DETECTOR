@@ -11,7 +11,7 @@ An advanced full-stack AI-powered phishing detector that inspects URLs, email bo
 - **Email Header Analysis** — Validates SPF/DKIM/DMARC authentication and detects From/Return-Path sender spoofing
 - **Privacy-first Analysis** — Local-only analysis is the default; external providers require explicit per-scan opt-in
 - **Optional External Analysis** — Explicitly opt in per scan to send relevant content/URL indicators to configured threat-intelligence providers or Gemini
-- **Scan History** — Persists up to 30 previous scans in local browser storage
+- **Scan History** — Server-side, scoped per account or guest session; stores a bounded, sanitized input preview plus the stored analysis result (up to 30 records are listed per request)
 - **Cinematic UI** — Dark glassmorphism design with animated scanning overlays and live risk gauges
 
 ---
@@ -126,6 +126,10 @@ The detector defaults to local-only analysis: local heuristics and locally store
 7. **MISP Threat Sharing**: (Configurable adapter) Set `MISP_SERVER_URL=https://misp.your-org.local` and `MISP_API_KEY=your_key_here` in `backend/.env` (disabled if unconfigured).
 
 All keys are server-side only and never leaked to frontend clients or persisted in logs. External processing is controlled per scan by `allow_external_processing`, which defaults to `false`.
+
+### What scan history stores
+
+Scan history keeps a bounded, sanitized input preview (100 characters plus an ellipsis) together with the risk score, status, phishing signals, structured diagnostic `details`, and the validated `ai_explanation`. URL user-information, secret-bearing query and fragment parameters, signed-URL parameters, sensitive header values, and common credential shapes are masked in the stored preview and URL-bearing detail fields; scheme, host, path, parameter names, and harmless values remain visible. Redaction is best-effort pattern matching, not a guarantee that stored history is secret-free, and the stored explanation may still quote input content. See [Privacy and Data Processing](docs/privacy-and-data-processing.md#what-sentinel-stores).
 
 ---
 
