@@ -70,6 +70,7 @@ test("loopback is a warning locally but blocks a deployment build", () => {
     assert.equal(deployed.code, "loopback");
   }
 });
+
 test("localhost subdomains and trailing-dot localhost are blocked in deployment builds", () => {
   for (const value of [
     "https://api.localhost",
