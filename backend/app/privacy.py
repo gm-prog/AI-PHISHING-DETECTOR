@@ -80,6 +80,7 @@ _CONDITIONAL_SECRET_PARAMETERS = frozenset(
 )
 
 _PARAM_INDEX_RE = re.compile(r"(?:\[[^\]]*\])+$")
+_ROUTE_QUERY_ENCODED_RE = re.compile(r"(?i)%3f")
 _JWT_LIKE_RE = re.compile(r"^eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.")
 
 # URL-like spans inside free text (email bodies, signal descriptions, reports).
@@ -205,7 +206,12 @@ def _redact_pair(pair: str) -> str:
         decoded_name, _, decoded_value = decoded.partition("=")
         if _is_secret_pair(decoded_name, decoded_value):
             return f"{decoded_name.strip()}={MASK}"
+        return pair
 
+    # No assignment and no recognizable name: mask credential-shaped payloads
+    # (malformed or opaque fragment segments) as a conservative fallback.
+    if _looks_like_bare_secret(decoded):
+        return MASK
     return pair
 
 
@@ -217,17 +223,53 @@ def _redact_parameter_block(block: str) -> str:
     )
 
 
+def _looks_like_bare_secret(value: str) -> bool:
+    """Return True for an unassigned fragment segment shaped like a credential."""
+    if _JWT_LIKE_RE.match(value):
+        return True
+    return (
+        len(value) >= 24
+        and re.search(r"[A-Za-z]", value) is not None
+        and re.search(r"\d", value) is not None
+    )
+
+
+def _redact_route_style_fragment(fragment: str) -> Optional[str]:
+    """Redact parameters that follow a route prefix inside a fragment.
+
+    Route-style fragments (``#/oauth/callback?X-Amz-Signature=...``) keep their
+    parameters after a path.  Without splitting the prefix off, the whole
+    segment is treated as one parameter name and the secret rules never match.
+    The route prefix and the separator are preserved; the parameter portion is
+    redacted with the same rules as a normal query string.
+    """
+    route, separator, query = fragment.partition("?")
+    marker = "?"
+    if not separator:
+        encoded = _ROUTE_QUERY_ENCODED_RE.split(fragment, maxsplit=1)
+        if len(encoded) != 2:
+            return None
+        route, query = encoded
+        marker = "%3F"
+    if not route or "=" in route:
+        # Not a route prefix (or a bare assignment containing ``?``): let the
+        # whole-fragment parameter handling below decide.
+        return None
+    return f"{route}{marker}{_redact_parameter_block(query)}"
+
+
 def _redact_fragment(fragment: str) -> str:
     decoded = unquote_plus(fragment)
     if re.match(r"(?i)^\s*bearer\s+\S+", decoded):
         return MASK
+    route_style = _redact_route_style_fragment(fragment)
+    if route_style is not None:
+        return route_style
     if "=" in decoded:
         # Parameter handling also covers percent-encoded assignments and
         # generic credential-shaped values (``#key=a1b2c3d4``).
         return _redact_parameter_block(fragment)
-    if _JWT_LIKE_RE.match(decoded) or (
-        len(decoded) >= 24 and re.search(r"[A-Za-z]", decoded) and re.search(r"\d", decoded)
-    ):
+    if _looks_like_bare_secret(decoded):
         return MASK
     return fragment
 

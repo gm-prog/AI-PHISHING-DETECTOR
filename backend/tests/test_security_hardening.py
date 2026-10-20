@@ -1750,6 +1750,113 @@ def test_history_preview_redacts_secret_bearing_fragments(fragment, secret):
     assert "app.example.test/callback" in preview
 
 
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        f"#/oauth/callback?X-Amz-Signature={_PREVIEW_SECRET}",
+        f"#/oauth/callback?X-Amz-Credential=AKIA{_PREVIEW_SECRET}%2Fscope",
+        f"#/reset?access_token={_PREVIEW_SECRET}&view=compact",
+        f"#/callback?%58-Amz-Signature={_PREVIEW_SECRET}",
+        f"#/callback?%78-amz-signature={_PREVIEW_SECRET_ALT}",
+        f"#/cb?view=compact&token={_PREVIEW_SECRET}&X-Amz-Signature={_PREVIEW_SECRET_ALT}",
+        f"#/callback%3Faccess_token={_PREVIEW_SECRET}",
+        f"#/callback?token={_PREVIEW_SECRET}&token={_PREVIEW_SECRET_ALT}",
+    ],
+)
+def test_history_preview_redacts_secrets_in_route_style_fragments(fragment):
+    """Query parameters inside route-style fragments are redacted like bare ones."""
+    from app.privacy import sanitize_history_preview
+
+    preview = sanitize_history_preview(f"https://example.test/{fragment}", max_chars=300)
+
+    assert _PREVIEW_SECRET not in preview
+    assert _PREVIEW_SECRET_ALT not in preview
+    route_prefix = fragment.split("?")[0].split("%3F")[0].split("%3f")[0]
+    assert "https://example.test/" in preview
+    assert route_prefix in preview
+
+
+def test_history_preview_preserves_route_style_fragment_context():
+    """Route prefixes and harmless fragment parameters stay readable."""
+    from app.privacy import sanitize_history_preview
+
+    cases = {
+        "https://example.test/#/oauth/callback?view=compact": "#/oauth/callback?view=compact",
+        "https://example.test/#/oauth/callback?view=compact&lang=en": "#/oauth/callback?view=compact&lang=en",
+        "https://example.test/page#step-2": "#step-2",
+    }
+    for url, expected_fragment in cases.items():
+        preview = sanitize_history_preview(url, max_chars=300)
+        assert preview == url
+        assert expected_fragment in preview
+        assert "[MASKED]" not in preview
+
+
+def test_history_preview_route_fragment_redaction_is_idempotent():
+    from app.privacy import sanitize_history_preview
+
+    samples = [
+        f"https://example.test/#/oauth/callback?X-Amz-Signature={_PREVIEW_SECRET}&view=compact",
+        f"https://example.test/#/reset?access_token={_PREVIEW_SECRET}&token={_PREVIEW_SECRET_ALT}",
+        f"https://example.test/#/callback%3Faccess_token={_PREVIEW_SECRET}",
+        "https://example.test/#/oauth/callback?view=compact",
+    ]
+    for sample in samples:
+        once = sanitize_history_preview(sample, max_chars=300)
+        assert sanitize_history_preview(once, max_chars=300) == once
+
+
+@pytest.mark.parametrize(
+    ("fragment", "secret_must_be_masked"),
+    [
+        (f"#/cb?token={_PREVIEW_SECRET}&&&", True),
+        (f"#/cb?token={_PREVIEW_SECRET}&=&", True),
+        # Invalid percent-encoding without a parameter name is not a named
+        # credential; the documented guarantee there is no-crash + bounded.
+        (f"#/cb?%zz{_PREVIEW_SECRET}", False),
+        ("#/oauth/callback?", False),
+        ("#/?X-Amz-Signature", False),
+        ("#/cb?%3D%3D", False),
+        ("#/cb?&&&", False),
+    ],
+)
+def test_history_preview_route_fragments_handle_malformed_input(
+    fragment, secret_must_be_masked
+):
+    """Malformed route fragments must not raise and must stay bounded."""
+    from app.privacy import sanitize_history_preview
+
+    preview = sanitize_history_preview(f"https://example.test/{fragment}", max_chars=300)
+
+    assert isinstance(preview, str)
+    assert len(preview) <= 303
+    if secret_must_be_masked:
+        assert _PREVIEW_SECRET not in preview
+
+
+def test_route_style_fragment_secret_is_absent_from_persisted_preview(client):
+    """The storage boundary, not just the helper, must drop route-fragment secrets."""
+    client.get("/api/health")
+    content = (
+        f"https://example.test/#/oauth/callback?X-Amz-Signature={_PREVIEW_SECRET}"
+        "&view=compact"
+    )
+
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": content},
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+
+    record = _latest_scan_record()
+    assert record is not None
+    assert _PREVIEW_SECRET not in record.content
+    assert _PREVIEW_SECRET not in _persisted_scan_blob(record)
+    assert "oauth/callback?X-Amz-Signature=[MASKED]" in record.content
+    assert "view=compact" in record.content
+
+
 def test_history_preview_keeps_benign_fragment_and_query_context():
     from app.privacy import sanitize_history_preview
 
