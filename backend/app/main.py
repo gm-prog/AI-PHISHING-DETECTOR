@@ -32,6 +32,12 @@ from app.models.schemas import (
     AuthResponse,
     AdminMetricsOut
 )
+from app.privacy import (
+    redact_secrets_in_text,
+    sanitize_history_preview,
+    sanitize_persisted_details,
+    sanitize_persisted_signals,
+)
 from app.auth import (
 
     get_password_hash,
@@ -107,46 +113,6 @@ def security_rate_limit_key(request: Request) -> str:
             f"{client_ip}|{session}".encode("utf-8")
         ).hexdigest()
     return "ip:" + client_ip
-
-
-_SECRET_PATTERNS = [
-    # Authorization header / Bearer token
-    (re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-\.]{15,}"), "Bearer [MASKED]"),
-    (re.compile(r"(?i)authorization:\s*[^\r\n]+"), "Authorization: [MASKED]"),
-    # Common password assignments
-    (re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*[^\s&;]+"), r"\1=[MASKED]"),
-    # Common token / API key assignments
-    (re.compile(r"(?i)(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret)\s*[:=]\s*[^\s&;]+"), r"\1=[MASKED]"),
-    # Google API Key pattern
-    (re.compile(r"AIzaSy[A-Za-z0-9_\-]{10,}"), "AIzaSy...[MASKED]"),
-    # JWT-like pattern (header.payload.signature)
-    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_\-]{10,}"), "[MASKED_JWT]"),
-    # Credit card / PAN-like sequences (13-19 digits with optional spaces/dashes)
-    (re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[MASKED_CARD]"),
-    # Generic credential assignment with long value (24+ characters)
-    (re.compile(r"(?i)(key|token|secret|session)[=:]\s*([a-zA-Z0-9_\-]{24,})"), r"\1=[MASKED]"),
-]
-
-
-def sanitize_history_preview(content: str, max_chars: int = 100) -> str:
-    """
-    Sanitizes user input for persistent ScanHistory preview storage.
-    Masks credentials, API keys, passwords, bearer tokens, and payment card numbers
-    while preserving benign contextual text for dashboard display, capped at max_chars.
-    """
-    if not content:
-        return ""
-
-    sanitized = content.strip()
-    for pattern, repl in _SECRET_PATTERNS:
-        sanitized = pattern.sub(repl, sanitized)
-
-    # Collapse multiple whitespaces/newlines for clean single-line preview
-    sanitized = re.sub(r"\s+", " ", sanitized).strip()
-
-    if len(sanitized) > max_chars:
-        return sanitized[:max_chars] + "..."
-    return sanitized
 
 
 def security_daily_analysis_quota_key(request: Request) -> str:
@@ -932,14 +898,19 @@ async def analyze_input(
         f"{build_analysis_privacy_disclosure(input_type, body.allow_external_processing)}"
     )
 
-    # 5. Persist to Database with User Scoping (RLS/Isolation) and Sanitized History Preview
+    # 5. Persist to Database with User Scoping (RLS/Isolation) and a sanitized
+    # history projection. The analyzers and any consented providers received
+    # the raw ``content`` above; only the stored copies are redacted.
     user_id = current_user.id if current_user else None
     guest_session_hash = None
     if current_user is None:
         guest_token = _get_or_create_guest_token(request, response)
         guest_session_hash = _guest_session_hash(guest_token)
-    snippet = sanitize_history_preview(content, max_chars=100)
     technical_details["external_processing_allowed"] = body.allow_external_processing
+    persisted_snippet = sanitize_history_preview(content, max_chars=100)
+    persisted_signals = sanitize_persisted_signals(final_signals)
+    persisted_details = sanitize_persisted_details(technical_details)
+    persisted_explanation = redact_secrets_in_text(ai_explanation)
 
     db_record = ScanHistory(
         id=str(uuid.uuid4()),
@@ -947,12 +918,12 @@ async def analyze_input(
         guest_session_hash=guest_session_hash,
         timestamp=datetime.now(timezone.utc).isoformat(),
         input_type=input_type,
-        content=snippet,
+        content=persisted_snippet,
         risk_score=final_score,
         status=final_status,
-        phishing_signals=final_signals,
-        ai_explanation=ai_explanation,
-        details=technical_details
+        phishing_signals=persisted_signals,
+        ai_explanation=persisted_explanation,
+        details=persisted_details
     )
     try:
         with telemetry.operation("analysis.persistence"):

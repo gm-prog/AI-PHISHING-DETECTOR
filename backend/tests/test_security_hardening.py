@@ -1612,6 +1612,606 @@ def test_scan_history_preview_persistence_in_database(client):
         db.close()
 
 
+# ================= PERSISTED PREVIEW REDACTION (PRIVACY HARDENING) =================
+
+# Distinctive synthetic values that must never survive into persisted history.
+# Concatenated (like the existing fixtures in this module) so repository secret
+# scanners do not flag the test data as a leaked credential.
+_PREVIEW_SECRET = "zQ9Xk2Lm" + "7Pw4Vb1N"
+_PREVIEW_SECRET_ALT = "R7tY4uI8" + "oP2aS5dF"
+
+
+def _latest_scan_record():
+    db = TestingSessionLocal()
+    try:
+        return db.query(ScanHistory).order_by(ScanHistory.timestamp.desc()).first()
+    finally:
+        db.close()
+
+
+def _persisted_scan_blob(record):
+    import json
+
+    return json.dumps(
+        {
+            "content": record.content,
+            "details": record.details,
+            "signals": record.phishing_signals,
+            "explanation": record.ai_explanation,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:password@example.test/path",
+        f"https://alice:{_PREVIEW_SECRET}@example.test/login?next=%2Fdashboard",
+        f"http://bob:{_PREVIEW_SECRET_ALT}@sub.example.test/a/b",
+    ],
+)
+def test_history_preview_removes_url_user_information(url):
+    """Credentials in URL user-info are masked; scheme, host, and path survive."""
+    from app.privacy import sanitize_history_preview
+
+    preview = sanitize_history_preview(url, max_chars=300)
+
+    assert _PREVIEW_SECRET not in preview
+    assert _PREVIEW_SECRET_ALT not in preview
+    assert "user:password" not in preview
+    assert "alice" not in preview
+    assert "bob" not in preview
+    assert "[MASKED]@" in preview
+    assert "example.test" in preview
+
+
+@pytest.mark.parametrize(
+    "parameter",
+    [
+        "token",
+        "access_token",
+        "ACCESS_TOKEN",
+        "refresh_token",
+        "id_token",
+        "api_key",
+        "apikey",
+        "API-KEY",
+        "secret",
+        "client_secret",
+        "password",
+        "passwd",
+        "authorization",
+        "auth",
+        "bearer",
+        "session",
+        "sessionid",
+        "X-Amz-Signature",
+        "X-Amz-Credential",
+        "X-Amz-Security-Token",
+        "X-Goog-Signature",
+        "X-Goog-Credential",
+    ],
+)
+def test_history_preview_redacts_secret_query_parameters(parameter):
+    """Secret-bearing query keys are matched case-insensitively; names survive."""
+    from app.privacy import sanitize_history_preview
+
+    url = (
+        f"https://portal.example.test/login?{parameter}={_PREVIEW_SECRET}"
+        "&lang=en&redirect=%2Fhome"
+    )
+    preview = sanitize_history_preview(url, max_chars=300)
+
+    assert _PREVIEW_SECRET not in preview
+    assert f"{parameter}=[MASKED]" in preview
+    assert "lang=en" in preview
+    assert "redirect=%2Fhome" in preview
+    assert "https://portal.example.test/login" in preview
+
+
+@pytest.mark.parametrize(
+    ("value", "must_be_masked"),
+    [
+        ("value", False),
+        ("searchterm", False),
+        ("a1b2c3d4e5f6", True),
+        ("ABCDEF1234567890", True),
+        (_PREVIEW_SECRET, True),
+    ],
+)
+def test_history_preview_generic_key_parameter_is_conditional(value, must_be_masked):
+    """``?key=`` is masked only when its value looks like a machine credential."""
+    from app.privacy import sanitize_history_preview
+
+    preview = sanitize_history_preview(f"https://lookup.example.test/?key={value}")
+
+    if must_be_masked:
+        assert value not in preview
+        assert "key=[MASKED]" in preview
+    else:
+        assert f"key={value}" in preview
+
+
+@pytest.mark.parametrize(
+    ("fragment", "secret"),
+    [
+        (f"#access_token={_PREVIEW_SECRET}", _PREVIEW_SECRET),
+        (f"#token={_PREVIEW_SECRET}&scope=read", _PREVIEW_SECRET),
+        (f"#Bearer%20{_PREVIEW_SECRET}", _PREVIEW_SECRET),
+        (f"#key={_PREVIEW_SECRET}", _PREVIEW_SECRET),
+    ],
+)
+def test_history_preview_redacts_secret_bearing_fragments(fragment, secret):
+    from app.privacy import sanitize_history_preview
+
+    preview = sanitize_history_preview(f"https://app.example.test/callback{fragment}")
+
+    assert secret not in preview
+    assert "app.example.test/callback" in preview
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        f"#/oauth/callback?X-Amz-Signature={_PREVIEW_SECRET}",
+        f"#/oauth/callback?X-Amz-Credential=AKIA{_PREVIEW_SECRET}%2Fscope",
+        f"#/reset?access_token={_PREVIEW_SECRET}&view=compact",
+        f"#/callback?%58-Amz-Signature={_PREVIEW_SECRET}",
+        f"#/callback?%78-amz-signature={_PREVIEW_SECRET_ALT}",
+        f"#/cb?view=compact&token={_PREVIEW_SECRET}&X-Amz-Signature={_PREVIEW_SECRET_ALT}",
+        f"#/callback%3Faccess_token={_PREVIEW_SECRET}",
+        f"#/callback?token={_PREVIEW_SECRET}&token={_PREVIEW_SECRET_ALT}",
+    ],
+)
+def test_history_preview_redacts_secrets_in_route_style_fragments(fragment):
+    """Query parameters inside route-style fragments are redacted like bare ones."""
+    from app.privacy import sanitize_history_preview
+
+    preview = sanitize_history_preview(f"https://example.test/{fragment}", max_chars=300)
+
+    assert _PREVIEW_SECRET not in preview
+    assert _PREVIEW_SECRET_ALT not in preview
+    route_prefix = fragment.split("?")[0].split("%3F")[0].split("%3f")[0]
+    assert "https://example.test/" in preview
+    assert route_prefix in preview
+
+
+def test_history_preview_preserves_route_style_fragment_context():
+    """Route prefixes and harmless fragment parameters stay readable."""
+    from app.privacy import sanitize_history_preview
+
+    cases = {
+        "https://example.test/#/oauth/callback?view=compact": "#/oauth/callback?view=compact",
+        "https://example.test/#/oauth/callback?view=compact&lang=en": "#/oauth/callback?view=compact&lang=en",
+        "https://example.test/page#step-2": "#step-2",
+    }
+    for url, expected_fragment in cases.items():
+        preview = sanitize_history_preview(url, max_chars=300)
+        assert preview == url
+        assert expected_fragment in preview
+        assert "[MASKED]" not in preview
+
+
+def test_history_preview_route_fragment_redaction_is_idempotent():
+    from app.privacy import sanitize_history_preview
+
+    samples = [
+        f"https://example.test/#/oauth/callback?X-Amz-Signature={_PREVIEW_SECRET}&view=compact",
+        f"https://example.test/#/reset?access_token={_PREVIEW_SECRET}&token={_PREVIEW_SECRET_ALT}",
+        f"https://example.test/#/callback%3Faccess_token={_PREVIEW_SECRET}",
+        "https://example.test/#/oauth/callback?view=compact",
+    ]
+    for sample in samples:
+        once = sanitize_history_preview(sample, max_chars=300)
+        assert sanitize_history_preview(once, max_chars=300) == once
+
+
+@pytest.mark.parametrize(
+    ("fragment", "secret_must_be_masked"),
+    [
+        (f"#/cb?token={_PREVIEW_SECRET}&&&", True),
+        (f"#/cb?token={_PREVIEW_SECRET}&=&", True),
+        # Invalid percent-encoding without a parameter name is not a named
+        # credential; the documented guarantee there is no-crash + bounded.
+        (f"#/cb?%zz{_PREVIEW_SECRET}", False),
+        ("#/oauth/callback?", False),
+        ("#/?X-Amz-Signature", False),
+        ("#/cb?%3D%3D", False),
+        ("#/cb?&&&", False),
+    ],
+)
+def test_history_preview_route_fragments_handle_malformed_input(
+    fragment, secret_must_be_masked
+):
+    """Malformed route fragments must not raise and must stay bounded."""
+    from app.privacy import sanitize_history_preview
+
+    preview = sanitize_history_preview(f"https://example.test/{fragment}", max_chars=300)
+
+    assert isinstance(preview, str)
+    assert len(preview) <= 303
+    if secret_must_be_masked:
+        assert _PREVIEW_SECRET not in preview
+
+
+def test_route_style_fragment_secret_is_absent_from_persisted_preview(client):
+    """The storage boundary, not just the helper, must drop route-fragment secrets."""
+    client.get("/api/health")
+    content = (
+        f"https://example.test/#/oauth/callback?X-Amz-Signature={_PREVIEW_SECRET}"
+        "&view=compact"
+    )
+
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": content},
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+
+    record = _latest_scan_record()
+    assert record is not None
+    assert _PREVIEW_SECRET not in record.content
+    assert _PREVIEW_SECRET not in _persisted_scan_blob(record)
+    assert "oauth/callback?X-Amz-Signature=[MASKED]" in record.content
+    assert "view=compact" in record.content
+
+
+def test_history_preview_keeps_benign_fragment_and_query_context():
+    from app.privacy import sanitize_history_preview
+
+    url = "https://login.example.test/secure/verify?email=user%40example.test&lang=en#step-2"
+    assert sanitize_history_preview(url, max_chars=300) == url
+
+
+@pytest.mark.parametrize(
+    ("header_line", "secret"),
+    [
+        (f"Authorization: Bearer {_PREVIEW_SECRET}", _PREVIEW_SECRET),
+        (f"Proxy-Authorization: Basic {_PREVIEW_SECRET}", _PREVIEW_SECRET),
+        (f"Cookie: session={_PREVIEW_SECRET}; theme=dark", _PREVIEW_SECRET),
+        (f"Set-Cookie: sid={_PREVIEW_SECRET}; HttpOnly", _PREVIEW_SECRET),
+    ],
+)
+def test_history_preview_redacts_sensitive_header_values(header_line, secret):
+    """Sensitive raw-header values are masked inside header-input previews."""
+    from app.privacy import sanitize_history_preview
+
+    content = f"From: notices@example.test\nSubject: urgent account notice\n{header_line}"
+    preview = sanitize_history_preview(content, max_chars=300)
+
+    assert secret not in preview
+    assert "[MASKED]" in preview
+    assert "From: notices@example.test" in preview
+    assert "Subject: urgent account notice" in preview
+
+
+def test_history_preview_redacts_folded_header_continuations():
+    """A credential wrapped onto an RFC 5322 continuation line is fully masked."""
+    from app.privacy import sanitize_history_preview
+
+    content = (
+        "From: notices@example.test\n"
+        "Authorization: Bearer firstpart\n"
+        " secondpart\n"
+        "Subject: urgent account notice"
+    )
+    preview = sanitize_history_preview(content, max_chars=300)
+
+    assert "firstpart" not in preview
+    assert "secondpart" not in preview
+    assert preview.startswith("From: notices@example.test Authorization: [MASKED]")
+    assert "Subject: urgent account notice" in preview
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"example.test/login?token={_PREVIEW_SECRET}&lang=en",
+        f"paypal-verify.xyz/path?access_token={_PREVIEW_SECRET}#step-2",
+        f"HTTPS://EXAMPLE.TEST/login?TOKEN={_PREVIEW_SECRET}",
+        f"authorization={_PREVIEW_SECRET} in the pasted body",
+    ],
+)
+def test_history_preview_redacts_schemeless_and_mixed_case_credentials(content):
+    """Schemeless URLs and inline assignments are redacted like full URLs."""
+    from app.privacy import sanitize_history_preview
+
+    preview = sanitize_history_preview(content, max_chars=300)
+
+    assert _PREVIEW_SECRET not in preview
+    assert "[MASKED]" in preview
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"https://example.test/?%74oken={_PREVIEW_SECRET}",
+        f"https://example.test/?password%3D{_PREVIEW_SECRET}",
+        f"https://example.test/?token={_PREVIEW_SECRET}&token={_PREVIEW_SECRET_ALT}",
+        "https://[::1",
+        "https://user:pass@@host.example.test/path",
+        "https://%zz%:bad@host.example.test/",
+        "token=" + "a" * 50_000,
+    ],
+)
+def test_history_preview_handles_encoded_repeated_and_malformed_input(content):
+    """Encoded, repeated, and malformed URLs take the safe path without raising."""
+    from app.privacy import sanitize_history_preview
+
+    preview = sanitize_history_preview(content)
+
+    assert isinstance(preview, str)
+    assert _PREVIEW_SECRET not in preview
+    assert _PREVIEW_SECRET_ALT not in preview
+    assert len(preview) <= 103
+
+
+def test_history_preview_length_bound_survives_worst_case_redaction():
+    from app.privacy import sanitize_history_preview
+
+    worst_case = "&".join(f"token={index}" for index in range(2000))
+    preview = sanitize_history_preview(worst_case, max_chars=100)
+
+    assert len(preview) <= 103
+    assert preview.endswith("...")
+    assert "token=[MASKED]" in preview
+
+
+def test_history_preview_redaction_is_idempotent():
+    from app.privacy import sanitize_history_preview
+
+    samples = [
+        f"https://alice:{_PREVIEW_SECRET}@example.test/login?token={_PREVIEW_SECRET}#access_token={_PREVIEW_SECRET_ALT}",
+        f"Authorization: Bearer {_PREVIEW_SECRET}\nCookie: session={_PREVIEW_SECRET_ALT}",
+    ]
+    for sample in samples:
+        once = sanitize_history_preview(sample, max_chars=300)
+        assert sanitize_history_preview(once, max_chars=300) == once
+
+
+def test_persisted_projection_is_a_redacted_copy():
+    """Structured details/signals are redacted without mutating analysis objects."""
+    from app.privacy import sanitize_persisted_details, sanitize_persisted_signals
+
+    details = {
+        "host": f"alice:{_PREVIEW_SECRET}@example.test",
+        "links_found": [f"https://example.test/login?token={_PREVIEW_SECRET}"],
+        "links_analysis": [
+            {"url": f"https://example.test/login?token={_PREVIEW_SECRET}", "risk_score": 10}
+        ],
+        "length": 42,
+        "external_processing_allowed": False,
+    }
+    signals = [
+        {
+            "id": "nested_url",
+            "severity": "high",
+            "title": "Nested Link",
+            "description": f"Link https://example.test/?token={_PREVIEW_SECRET} triggered",
+        }
+    ]
+
+    persisted_details = sanitize_persisted_details(details)
+    persisted_signals = sanitize_persisted_signals(signals)
+
+    assert _PREVIEW_SECRET not in str(persisted_details)
+    assert _PREVIEW_SECRET not in str(persisted_signals)
+    assert persisted_details["host"] == "[MASKED]@example.test"
+    assert persisted_details["length"] == 42
+    assert persisted_details["external_processing_allowed"] is False
+    assert "example.test/login" in persisted_details["links_found"][0]
+    # The in-request analysis objects used for the API response are untouched.
+    assert details["host"] == f"alice:{_PREVIEW_SECRET}@example.test"
+    assert _PREVIEW_SECRET in details["links_found"][0]
+    assert _PREVIEW_SECRET in signals[0]["description"]
+
+
+def test_analysis_receives_raw_input_while_persistence_is_redacted(client, monkeypatch):
+    """The analyzer sees the submitted URL; only the stored copy is redacted."""
+    import app.main as main_module
+
+    seen = []
+
+    def spy_analyze_url(url):
+        seen.append(url)
+        return {"risk_score": 5, "signals": [], "details": {"host": "example.test"}}
+
+    monkeypatch.setattr(main_module, "analyze_url", spy_analyze_url)
+
+    content = (
+        f"https://alice:{_PREVIEW_SECRET}@example.test/login"
+        f"?access_token={_PREVIEW_SECRET_ALT}&lang=en"
+    )
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": content},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert seen == [content]
+    assert response.json()["external_processing_allowed"] is False
+
+    record = _latest_scan_record()
+    assert record is not None
+    assert _PREVIEW_SECRET not in record.content
+    assert _PREVIEW_SECRET_ALT not in record.content
+    assert "alice" not in record.content
+    assert "[MASKED]@example.test/login" in record.content
+    assert "lang=en" in record.content
+
+
+def test_persisted_url_scan_details_do_not_retain_userinfo(client):
+    """``details.host`` is an authority string; its user-info must not persist."""
+    client.get("/api/health")
+    content = f"https://carol:{_PREVIEW_SECRET}@paypal-verify.example.test/login"
+
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": content},
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+
+    record = _latest_scan_record()
+    assert record is not None
+    assert _PREVIEW_SECRET not in _persisted_scan_blob(record)
+    assert "carol" not in str(record.details)
+    assert record.details["host"] == "[MASKED]@paypal-verify.example.test"
+    assert "paypal-verify.example.test" in record.details["host"]
+
+
+def test_persisted_email_text_results_do_not_retain_url_credentials(client):
+    """Email-body link diagnostics and reports must not persist URL credentials."""
+    client.get("/api/health")
+    content = (
+        "Urgent: verify your account at "
+        f"https://dave:{_PREVIEW_SECRET}@paypal-verify.example.test/login"
+        f"?access_token={_PREVIEW_SECRET_ALT} now."
+    )
+
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "email_text", "content": content},
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+
+    record = _latest_scan_record()
+    assert record is not None
+    blob = _persisted_scan_blob(record)
+    assert _PREVIEW_SECRET not in blob
+    assert _PREVIEW_SECRET_ALT not in blob
+    assert "dave" not in blob
+    assert "paypal-verify.example.test" in blob
+    assert "access_token=[MASKED]" in record.details["links_found"][0]
+    assert "[MASKED]@" in record.details["links_analysis"][0]["url"]
+
+
+def test_persisted_email_header_preview_redacts_sensitive_headers(client):
+    client.get("/api/health")
+    content = (
+        "From: notices@example.test\n"
+        "Subject: urgent account notice\n"
+        f"Authorization: Bearer {_PREVIEW_SECRET}\n"
+        f"Cookie: session={_PREVIEW_SECRET_ALT}\n"
+        f"Set-Cookie: sid={_PREVIEW_SECRET}"
+    )
+
+    response = client.post(
+        "/api/analyze",
+        json={"input_type": "email_header", "content": content},
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+
+    record = _latest_scan_record()
+    assert record is not None
+    assert _PREVIEW_SECRET not in record.content
+    assert _PREVIEW_SECRET_ALT not in record.content
+    assert "Authorization: [MASKED]" in record.content
+    assert "Cookie: [MASKED]" in record.content
+    assert "Subject: urgent account notice" in record.content
+    assert "From: notices@example.test" in record.content
+
+
+def test_history_list_and_single_record_return_sanitized_preview(client):
+    """Both history endpoints return the stored sanitized preview with user scoping."""
+    email = f"privacy_history_{uuid.uuid4().hex[:8]}@example.com"
+    assert register(client, email, "SecurePassword123!").status_code == 200
+
+    marker = f"uniq{uuid.uuid4().hex[:10]}"
+    content = (
+        f"https://alice:{_PREVIEW_SECRET}@history-check.example.test/{marker}"
+        f"?token={_PREVIEW_SECRET_ALT}"
+    )
+    scan = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": content},
+        headers=csrf_headers(client),
+    )
+    assert scan.status_code == 200
+
+    history = client.get("/api/history")
+    assert history.status_code == 200
+    record = next(item for item in history.json() if marker in item["content"])
+    assert _PREVIEW_SECRET not in record["content"]
+    assert _PREVIEW_SECRET_ALT not in record["content"]
+    assert "history-check.example.test" in record["content"]
+    assert record["response"]["details"]["host"] == "[MASKED]@history-check.example.test"
+
+    single = client.get(f"/api/history/{record['id']}")
+    assert single.status_code == 200
+    assert single.json()["content"] == record["content"]
+    assert _PREVIEW_SECRET not in single.json()["content"]
+    assert _PREVIEW_SECRET_ALT not in single.json()["response"]["details"].get(
+        "links_found", []
+    )
+    assert single.json()["response"]["external_processing_allowed"] is False
+
+    # Ownership boundary is unchanged: another account cannot read the record.
+    other = TestClient(app)
+    other_email = f"privacy_intruder_{uuid.uuid4().hex[:8]}@example.com"
+    assert register(other, other_email, "SecurePassword123!").status_code == 200
+    assert other.get(f"/api/history/{record['id']}").status_code == 403
+    assert other.get("/api/history").json() == []
+
+
+def test_explicit_consent_mode_is_unchanged_by_preview_redaction(client):
+    """Redaction must not alter the per-scan consent decision recorded for history."""
+    client.get("/api/health")
+    content = (
+        f"https://eve:{_PREVIEW_SECRET}@consent-check.example.test/login"
+        f"?token={_PREVIEW_SECRET_ALT}"
+    )
+
+    response = client.post(
+        "/api/analyze",
+        json={
+            "input_type": "url",
+            "content": content,
+            "allow_external_processing": True,
+        },
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200
+    assert response.json()["external_processing_allowed"] is True
+
+    record = _latest_scan_record()
+    assert record is not None
+    assert record.details["external_processing_allowed"] is True
+    assert _PREVIEW_SECRET not in record.content
+    assert _PREVIEW_SECRET_ALT not in record.content
+    assert "consent-check.example.test" in record.content
+
+
+def test_guest_history_list_returns_sanitized_preview_and_stays_isolated(client):
+    client.get("/api/health")
+    marker = f"guest{uuid.uuid4().hex[:10]}"
+    content = (
+        f"https://guest:{_PREVIEW_SECRET}@guest-check.example.test/{marker}"
+        f"?password={_PREVIEW_SECRET_ALT}"
+    )
+    scan = client.post(
+        "/api/analyze",
+        json={"input_type": "url", "content": content},
+        headers=csrf_headers(client),
+    )
+    assert scan.status_code == 200
+
+    history = client.get("/api/history")
+    assert history.status_code == 200
+    record = next(item for item in history.json() if marker in item["content"])
+    assert _PREVIEW_SECRET not in record["content"]
+    assert _PREVIEW_SECRET_ALT not in record["content"]
+    assert "guest-check.example.test" in record["content"]
+
+    other_guest = TestClient(app)
+    other_guest.get("/api/health")
+    assert other_guest.get("/api/history").json() == []
+
+
 def test_logging_sanitization_removes_raw_exceptions(caplog):
     """
     Test Gateway v1.2 Logging:
