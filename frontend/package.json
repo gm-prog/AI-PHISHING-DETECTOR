@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "node --test src/components/consentLifecycle.test.mjs"
+    "test": "node --test src/components/consentLifecycle.test.mjs scripts/validate-api-base-url.test.mjs",
+    "test:build-guard": "node --test scripts/validate-api-base-url.test.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.0",

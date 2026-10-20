@@ -111,6 +111,17 @@ invariant verification. See **[docs/deployment.md](docs/deployment.md)** for
 the full deployment contract (Render Blueprint, `$PORT`, health check,
 PostgreSQL provisioning, live verification).
 
+**Frontend origin.** The frontend is a static Vite build with no runtime
+configuration: its API origin is compiled into the bundle from
+`VITE_API_BASE_URL`, which must be set in the hosting provider's build
+environment for the production deployment (scheme + host only — the client
+appends `/api/...`). It is **build-time and public**, never a secret, and a
+change requires a rebuild. A placeholder always fails the build; missing,
+loopback, or non-HTTPS values fail deployment builds, while local builds warn
+when the origin is unset or loopback — see the
+[frontend build & API origin contract](docs/deployment.md#10-frontend-build--api-origin-contract)
+and the [production configuration matrix](docs/deployment.md#111-variable-and-configuration-matrix).
+
 ---
 
 ## 🔑 Gemini AI & Threat Intelligence Setup (Optional)
