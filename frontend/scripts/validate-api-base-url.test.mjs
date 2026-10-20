@@ -16,8 +16,10 @@ test("accepts a real https backend origin", () => {
   assert.equal(res.code, "ok");
 });
 
-test("accepts a trailing slash without treating it as a path", () => {
-  assert.equal(validateApiBaseUrl("https://api.sentinel-defense.com/").level, "ok");
+test("rejects a trailing slash so request paths cannot become double-slash URLs", () => {
+  const res = validateApiBaseUrl("https://api.sentinel-defense.com/");
+  assert.equal(res.level, "error");
+  assert.equal(res.code, "trailing-slash");
 });
 
 test("rejects the historical committed placeholder in every build mode", () => {
@@ -66,6 +68,17 @@ test("loopback is a warning locally but blocks a deployment build", () => {
     const deployed = validateApiBaseUrl(value, { deployment: true });
     assert.equal(deployed.level, "error", value);
     assert.equal(deployed.code, "loopback");
+  }
+});
+test("localhost subdomains and trailing-dot localhost are blocked in deployment builds", () => {
+  for (const value of [
+    "https://api.localhost",
+    "https://localhost.",
+    "https://api.localhost.",
+  ]) {
+    const deployed = validateApiBaseUrl(value, { deployment: true });
+    assert.equal(deployed.level, "error", value);
+    assert.equal(deployed.code, "loopback", value);
   }
 });
 
