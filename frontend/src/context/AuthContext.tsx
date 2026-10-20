@@ -1,19 +1,8 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
-import type { User, AuthState } from "../types";
+import React, { useCallback, useState, useEffect } from "react";
+import type { User } from "../types";
+import { AuthContext } from "./authContextDefinition";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
-
-interface AuthContextType extends AuthState {
-  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  register: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  logout: () => Promise<void>;
-  authFetch: (url: string, options?: RequestInit) => Promise<Response>;
-  isAuthModalOpen: boolean;
-  openAuthModal: () => void;
-  closeAuthModal: () => void;
-}
-
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 function getCookie(name: string): string | null {
   const prefix = `${name}=`;
@@ -38,6 +27,10 @@ function csrfHeaders(options: RequestInit): Headers {
     }
   }
   return headers;
+}
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -85,8 +78,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(data.user);
       setIsAuthModalOpen(false);
       return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err.message || "Network error connecting to auth service." };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err, "Network error connecting to auth service.") };
     }
   };
 
@@ -108,8 +101,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(data.user);
       setIsAuthModalOpen(false);
       return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err.message || "Network error connecting to auth service." };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err, "Network error connecting to auth service.") };
     }
   };
 
@@ -125,13 +118,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const authFetch = async (url: string, options: RequestInit = {}) => {
+  const authFetch = useCallback(async (url: string, options: RequestInit = {}) => {
     return fetch(url, {
       ...options,
       credentials: "include",
       headers: csrfHeaders(options),
     });
-  };
+  }, []);
+
+  const openAuthModal = useCallback(() => setIsAuthModalOpen(true), []);
+  const closeAuthModal = useCallback(() => setIsAuthModalOpen(false), []);
 
   return (
     <AuthContext.Provider
@@ -144,8 +140,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         logout,
         authFetch,
         isAuthModalOpen,
-        openAuthModal: () => setIsAuthModalOpen(true),
-        closeAuthModal: () => setIsAuthModalOpen(false),
+        openAuthModal,
+        closeAuthModal,
       }}
     >
       {children}
@@ -153,10 +149,3 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 };
 
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
-  return context;
-};
