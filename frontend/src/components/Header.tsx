@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useState, useEffect } from "react";
 import { ShieldCheck, Settings, Wifi, WifiOff, Sparkles, User as UserIcon, LogOut, Cpu } from "lucide-react";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 
 interface HeaderProps {
   onOpenSettings: () => void;
@@ -18,27 +18,30 @@ export const Header: React.FC<HeaderProps> = ({
   const { user, isAuthenticated, logout, openAuthModal } = useAuth();
   const [backendStatus, setBackendStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
 
-  const checkHealth = async () => {
+  const checkHealth = useCallback(async () => {
     try {
       const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
       const res = await fetch(`${API_BASE}/api/health`, { credentials: "include" });
       if (res.ok) {
-        const data = await res.json();
+        const data: { gemini_configured?: boolean } = await res.json();
         setBackendStatus("connected");
-        setBackendGeminiConfigured(data.gemini_configured || false);
+        setBackendGeminiConfigured(Boolean(data.gemini_configured));
       } else {
         setBackendStatus("disconnected");
       }
     } catch {
       setBackendStatus("disconnected");
     }
-  };
+  }, [setBackendGeminiConfigured]);
 
   useEffect(() => {
-    checkHealth();
-    const interval = setInterval(checkHealth, 10000);
-    return () => clearInterval(interval);
-  }, []);
+    const initialCheck = window.setTimeout(() => { void checkHealth(); }, 0);
+    const interval = window.setInterval(() => { void checkHealth(); }, 10000);
+    return () => {
+      window.clearTimeout(initialCheck);
+      window.clearInterval(interval);
+    };
+  }, [checkHealth]);
 
   const hasApiKey = backendGeminiConfigured;
 
