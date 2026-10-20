@@ -421,13 +421,16 @@ It **fails the build** when the configured value:
   `changeme`, `placeholder`, …);
 - points at a reserved host (`.example`, `.invalid`, `.test`, `example.com`);
 - is not an absolute `http(s)` URL, or embeds credentials;
-- contains a path, query, or fragment (the client appends `/api/...` itself, so
-  `https://host/api` would produce `/api/api/...`).
+- contains a path, query, fragment, or explicit trailing slash (the client appends
+  `/api/...` itself, so a path can produce a duplicated prefix and a trailing
+  slash can create a double-slash request path).
 
 It additionally fails when the build is known to be a **deployment build** and
-the value is missing, loopback (`localhost`, `127.0.0.0/8`, `::1`), or plain
-`http`. A build is treated as a deployment build when `VERCEL=1` (set by Vercel)
-or `SENTINEL_REQUIRE_API_BASE_URL=1` is present, so ordinary local and CI builds
+the value is missing, loopback (`localhost`, subdomains of `.localhost`,
+`127.0.0.0/8`, or `::1`), or plain `http`. Loopback detection also normalizes
+trailing DNS dots. An explicit trailing slash is rejected in every build mode.
+A build is treated as a deployment build when `VERCEL=1` (set by Vercel) or
+`SENTINEL_REQUIRE_API_BASE_URL=1` is present, so ordinary local and CI builds
 that intentionally use the loopback default still succeed with a warning
 instead of an error.
 
@@ -530,11 +533,12 @@ this section.
    origin echoed in `access-control-allow-origin` and
    `access-control-allow-credentials: true`; a disallowed origin must get no
    `access-control-allow-origin` header.
-5. **Frontend.** In the frontend project, set `VITE_API_BASE_URL` for the
-   Production scope to the origin from step 2 (scheme + host only, no path).
-   Confirm whether `frontend/vercel.json`'s `env` reference `@vite_api_base_url`
-   resolves — if that project variable is missing the build fails or the value is
-   stale. Keep only one authoritative source for the value.
+5. **Frontend.** In Vercel Project Settings → Environment Variables, set
+   `VITE_API_BASE_URL` for the Production environment to the origin from step 2
+   (scheme + host only, no path or trailing slash). This is a build-time Vite
+   variable for a static bundle. The repository's `vercel.json` intentionally
+   does not duplicate it; Project Settings is the authoritative source. Trigger
+   a fresh production build after changing it.
 6. **Rebuild and redeploy the frontend** (the value is baked in at build time; a
    restart is not enough).
 7. **Verify the deployed bundle**: the artifact must contain the step-2 origin and
