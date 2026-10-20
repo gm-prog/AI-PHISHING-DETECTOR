@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { History, Trash2, Globe, FileText, Code2, AlertTriangle, Search, X } from "lucide-react";
 import type { ScanHistoryItem } from "../types";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 
 interface HistoryTrackerProps {
   history: ScanHistoryItem[];
