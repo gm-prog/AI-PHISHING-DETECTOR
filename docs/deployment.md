@@ -367,3 +367,193 @@ Existing locks/semaphores are **in-process only**, not distributed locks. Any la
 operator-managed scheduling must avoid overlapping web/manual/job refreshes for a
 source and separately approve cost, credentials, retention and failure alerts.
 **No scheduler or Cron service is configured or provisioned in `render.yaml`.**
+
+## 10. Frontend build & API origin contract
+
+The frontend is a pure static Vite build. It has **no runtime configuration
+file**: the API origin is fixed when the bundle is compiled.
+
+### 10.1 How the API origin is resolved
+
+`VITE_API_BASE_URL` is read by Vite and inlined as a string literal at build
+time. Six call sites resolve it independently and append concrete `/api/...`
+paths:
+
+| File | Line | Request |
+| --- | --- | --- |
+| `frontend/src/context/AuthContext.tsx` | 4 (constant) | `GET /api/health` (CSRF bootstrap), `GET /api/auth/me`, `POST /api/auth/login`, `POST /api/auth/register`, `POST /api/auth/logout` |
+| `frontend/src/hooks/usePhishingScanner.ts` | 33, 64, 103, 116 | `GET /api/history`, `POST /api/analyze`, `DELETE /api/history`, `DELETE /api/history/{id}` |
+| `frontend/src/components/Header.tsx` | 23 | `GET /api/health` (polled every 10 s) |
+
+Each site is written as:
+
+```ts
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+```
+
+Because `import.meta.env.VITE_API_BASE_URL` is **substituted with a literal
+string**, a configured value makes the `|| "http://127.0.0.1:8000"` fallback
+dead code. Whatever value is configured is what every request uses.
+
+Vite loads `frontend/.env.production` for `vite build` (mode `production`), and
+real environment variables take precedence over `.env` files. Loading order for
+the browser value is therefore:
+
+1. a `VITE_API_BASE_URL` environment variable present in the build environment
+   (e.g. the hosting provider's build variables) — **wins**;
+2. otherwise a `VITE_API_BASE_URL` assignment in `frontend/.env.production`;
+3. otherwise `undefined`, and the application falls back to
+   `http://127.0.0.1:8000`.
+
+There is no same-origin/proxy mode: the frontend and backend are deployed on
+different origins and are joined only by this variable plus the backend's
+`ALLOWED_ORIGINS` CORS allowlist.
+
+### 10.2 Placeholder protection (build-time fail-fast)
+
+`frontend/scripts/validate-api-base-url.mjs` is wired into
+`frontend/vite.config.ts` as the `sentinel:api-base-url-guard` plugin. It runs
+before the bundle is written.
+
+It **fails the build** when the configured value:
+
+- still contains a placeholder marker (`your-render-backend-url`, `your-domain`,
+  `changeme`, `placeholder`, …);
+- points at a reserved host (`.example`, `.invalid`, `.test`, `example.com`);
+- is not an absolute `http(s)` URL, or embeds credentials;
+- contains a path, query, or fragment (the client appends `/api/...` itself, so
+  `https://host/api` would produce `/api/api/...`).
+
+It additionally fails when the build is known to be a **deployment build** and
+the value is missing, loopback (`localhost`, `127.0.0.0/8`, `::1`), or plain
+`http`. A build is treated as a deployment build when `VERCEL=1` (set by Vercel)
+or `SENTINEL_REQUIRE_API_BASE_URL=1` is present, so ordinary local and CI builds
+that intentionally use the loopback default still succeed with a warning
+instead of an error.
+
+An unset variable in a non-deployment build emits a prominent warning stating
+that the artifact is **not deployable**.
+
+```bash
+cd frontend
+npm test                 # includes scripts/validate-api-base-url.test.mjs
+npm run test:build-guard # guard unit tests only
+```
+
+### 10.3 Verifying the built bundle
+
+Never infer the compiled origin from `.env.production` alone — a provider build
+variable may override it. Check the artifact:
+
+```bash
+cd frontend
+npm run build
+# The resolved origin must be the real backend origin:
+grep -o "https://[a-z0-9.-]*" dist/assets/*.js | sort -u | head
+# These must print nothing:
+grep -o "your-render-backend-url" dist/assets/*.js
+grep -o "127\.0\.0\.1:8000" dist/assets/*.js
+```
+
+The production API origin must be confirmed from the *deployed* artifact or from
+the hosting provider's production build variables — not guessed from a filename
+or a similar-looking domain.
+
+### 10.4 Cross-origin session cookies
+
+The session, CSRF, and guest cookies are issued by the backend origin. When the
+frontend and backend are on different sites (for example a `*.vercel.app`
+frontend and a `*.onrender.com` backend), those cookies are **third-party**.
+They are configured `SameSite=None; Secure` for that reason (`render.yaml` sets
+`AUTH_COOKIE_SAMESITE=none` and `AUTH_COOKIE_SECURE=true`), and `AUTH_COOKIE_SECURE`
+must stay `true`: `backend/app/config.py` refuses to start when `SameSite=None`
+is combined with `Secure=false`.
+
+Third-party cookie restrictions in some browsers can still drop these cookies and
+break authenticated flows. Serving both the frontend and the API from the same
+registrable domain (for example `app.example.com` + `api.example.com`) avoids the
+problem entirely. This is an infrastructure decision, not a code defect.
+
+## 11. Production configuration matrix & release checklist
+
+### 11.1 Variable and configuration matrix
+
+Names only — no values. "Verified" describes how the *contract* was checked, not
+whether the live provider has the value set.
+
+| Name | Scope | Kind | Requirement | Read by | Fail-closed behavior |
+| --- | --- | --- | --- | --- | --- |
+| `VITE_API_BASE_URL` | Frontend build | Build-time, **public** | **Required for a deployable build** | `vite.config.ts`, `src/context/AuthContext.tsx`, `src/hooks/usePhishingScanner.ts`, `src/components/Header.tsx` | Build fails on placeholder/malformed; fails on missing/loopback/plain-http in a deployment build |
+| `ENVIRONMENT` | Backend runtime | Runtime | Required (`production`) | `app/config.py` | Unknown values raise at import |
+| `DATABASE_URL` | Backend runtime | Runtime, **secret** | Required in production | `app/config.py`, `app/db.py`, `alembic/env.py` | Import fails when missing/blank/SQLite/malformed/no host |
+| `ALLOWED_ORIGINS` | Backend runtime | Runtime | Required in production | `app/config.py`, `app/main.py` | Import fails when missing, empty, `*`, non-absolute, or loopback |
+| `RATE_LIMIT_STORAGE_URI` | Backend runtime | Runtime, **secret** (contains creds) | Required in production | `app/config.py`, `app/main.py` | Import fails unless `redis://` or `rediss://` |
+| `AUTH_COOKIE_SECURE` | Backend runtime | Runtime | **Required `true` in production**; not enforced at import | `app/config.py`, `app/main.py` | Only enforced when `AUTH_COOKIE_SAMESITE=none`; see 11.3 |
+| `AUTH_COOKIE_SAMESITE` | Backend runtime | Runtime | `none` for cross-site frontend/backend | `app/config.py`, `app/main.py` | Import fails for values outside `lax/strict/none`, and for `none` without `AUTH_COOKIE_SECURE` |
+| `AUTH_COOKIE_NAME` / `CSRF_COOKIE_NAME` / `GUEST_COOKIE_NAME` | Backend runtime | Runtime | Optional (defaults exist) | `app/config.py` | Defaults |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | Backend runtime | Runtime | Optional (default `1440`) | `app/config.py` | Default |
+| `GEMINI_API_KEY` | Backend runtime | Runtime, **secret** | Optional — enables Gemini when a scan opts in | `app/config.py`, `app/services/llm_service.py` | Absent ⇒ local-only analysis |
+| `VIRUSTOTAL_API_KEY` | Backend runtime | Runtime, **secret** | Optional | `app/config.py` | Absent ⇒ provider skipped |
+| `GOOGLE_WEB_RISK_API_KEY` | Backend runtime | Runtime, **secret** | Optional | `app/config.py` | Absent ⇒ provider skipped |
+| `PHISHTANK_API_KEY` / `MISP_SERVER_URL` / `MISP_API_KEY` | Backend runtime | Runtime, **secret** | Optional | `app/config.py` | Absent ⇒ source reports `disabled` |
+| `TRUSTED_AUTHSERV_IDS` | Backend runtime | Runtime | Optional | `app/config.py` | Empty set |
+| `MAX_REQUEST_BODY_BYTES`, `MAX_EXTRACTED_URLS`, `LLM_MAX_INPUT_CHARS` | Backend runtime | Runtime | Optional | `app/config.py` | Defaults |
+| `THREAT_FEED_*` | Backend runtime / job | Runtime | Optional | `app/config.py` | Defaults |
+| `OTEL_*` | Backend runtime | Runtime | Optional | `app/telemetry.py` | Telemetry stays disabled unless configured |
+| `PORT` | Backend runtime | Injected by host | Provided by Render | `render.yaml` `startCommand` | — |
+
+`render.yaml` declares `DATABASE_URL`, `ALLOWED_ORIGINS`,
+`RATE_LIMIT_STORAGE_URI`, and `VIRUSTOTAL_API_KEY` as `sync: false`, meaning the
+operator supplies them in the Render dashboard. It does **not** declare
+`GEMINI_API_KEY`, `GOOGLE_WEB_RISK_API_KEY`, `PHISHTANK_API_KEY`, or `MISP_*`;
+those must be added by the operator if the corresponding capability is wanted.
+
+### 11.2 Ordered release checklist (for the authorised operator)
+
+None of the steps below were performed by the repository change that introduced
+this section.
+
+1. **Backend first.** In the verified backend service (Render: the web service
+   built from `render.yaml`), set `ENVIRONMENT=production`, `DATABASE_URL`
+   (PostgreSQL), `ALLOWED_ORIGINS` (the exact frontend origin, scheme + host,
+   https, no wildcard, no loopback), `RATE_LIMIT_STORAGE_URI`
+   (`redis://`/`rediss://`), `AUTH_COOKIE_SECURE=true`, and
+   `AUTH_COOKIE_SAMESITE=none` for a cross-site frontend.
+2. **Confirm the backend's real public origin** from the provider — do not infer
+   it. Record `scheme://host`.
+3. **Deploy the backend** and verify
+   `GET {backend-origin}/api/health` returns 200 and
+   `GET {backend-origin}/api/ready` returns 200 with
+   `{"status":"ready","database":"available"}` (503 means the database is not
+   reachable).
+4. **Verify CORS** for the exact frontend origin with a preflight, expecting the
+   origin echoed in `access-control-allow-origin` and
+   `access-control-allow-credentials: true`; a disallowed origin must get no
+   `access-control-allow-origin` header.
+5. **Frontend.** In the frontend project, set `VITE_API_BASE_URL` for the
+   Production scope to the origin from step 2 (scheme + host only, no path).
+   Confirm whether `frontend/vercel.json`'s `env` reference `@vite_api_base_url`
+   resolves — if that project variable is missing the build fails or the value is
+   stale. Keep only one authoritative source for the value.
+6. **Rebuild and redeploy the frontend** (the value is baked in at build time; a
+   restart is not enough).
+7. **Verify the deployed bundle**: the artifact must contain the step-2 origin and
+   must not contain `your-render-backend-url` or `127.0.0.1:8000`.
+8. **Smoke test in a browser**: `/api/health` badge shows connected, registration
+   and login set the session cookie, and an authenticated history load works.
+   These exercise the cross-origin cookie path that command-line requests do not.
+9. **Rollback**: redeploy the previous frontend build and, if needed, the
+   previous backend version. Because the frontend origin is compile-time, a bad
+   `VITE_API_BASE_URL` is corrected only by rebuilding — reverting the variable
+   without a rebuild changes nothing.
+
+### 11.3 Known configuration gaps (documented, not changed here)
+
+- **`AUTH_COOKIE_SECURE` is not enforced at startup for `AUTH_COOKIE_SAMESITE`
+  values other than `none`.** In production without the variable set, the
+  application starts with `AUTH_COOKIE_SECURE=False` and `AUTH_COOKIE_SAMESITE=lax`
+  and issues session cookies without the `Secure` flag. `render.yaml` sets the
+  safe values, so a blueprint-based deployment is correct; a hand-built
+  deployment that omits them is not. Enforcing this at import time would change
+  a startup contract that existing tests assert, so it is tracked as separate
+  work rather than bundled here.
